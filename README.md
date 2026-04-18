@@ -46,6 +46,78 @@ make run        # builds Debug and launches from DerivedData
 make kill       # stop the running menubar app
 ```
 
+## Receiving the stream
+
+Once a monitor is toggled on in ndi-bar, any NDI-compatible software on the
+same LAN can pick it up.
+
+### Quick sanity check — NDI Video Monitor
+
+Fastest way to confirm the stream is live before touching OBS:
+
+1. Download [NDI Tools](https://ndi.video/tools) (free).
+2. Run **NDI Video Monitor**.
+3. Right-click anywhere in the window → your Mac's hostname → the ndi-bar
+   source name. It looks like `Ryan-MacStudio – Display 1 (LG HDR 4K 2560×1440)`.
+
+If you can see live video here, the sender half is working and any issues
+from here on are on the receiver side.
+
+### Receiving in OBS Studio (macOS)
+
+OBS doesn't include NDI support out of the box — install the `obs-ndi`
+plugin first. It bundles its own NDI runtime, so even on a Mac that
+doesn't have the NDI SDK installed, OBS can still receive.
+
+1. **Install OBS** — `brew install --cask obs`, or grab the installer from
+   <https://obsproject.com/download>.
+2. **Install the NDI plugin** — download the latest macOS `.pkg` from
+   <https://github.com/obs-ndi/obs-ndi/releases> and run it. Quit and
+   relaunch OBS afterwards.
+3. **Add an NDI source:**
+   - In the OBS **Sources** panel, click **+** → **NDI™ Source**.
+   - Name it whatever you want ("Monitor 1", etc.) → **OK**.
+   - In the properties dialog:
+     - **Source name** — the dropdown lists every NDI source on the LAN.
+       Pick the ndi-bar entry for the monitor you want. One entry per
+       display you've toggled on.
+     - **Bandwidth** — `Highest` (you're on local LAN, not a remote feed).
+     - **Sync** — `Source Timing`.
+     - **Latency Mode** — `Low` for general use, `Lowest` if you need
+       sub-frame latency and can tolerate the occasional audio glitch.
+     - Leave the rest at defaults. Audio comes in on the same source.
+4. Resize the source in the preview canvas to fit.
+
+Matching resolutions helps avoid needless rescaling: if ndi-bar is set to
+1440p (in Settings) and your OBS canvas is 1080p, OBS will downscale
+every frame. Set **Settings → Video → Base (Canvas) Resolution** to match
+what you're sending, or go the other way and bump ndi-bar's output
+resolution in its Settings window.
+
+### Troubleshooting discovery
+
+If OBS's source dropdown is empty or missing ndi-bar:
+
+- Confirm ndi-bar is actually streaming — the menubar icon should be the
+  radio-waves glyph and the display row should have a checkmark.
+- OBS and your Mac must be on the same subnet. NDI uses mDNS for
+  discovery, which doesn't cross VLANs without an [NDI Discovery
+  Server](https://docs.ndi.video/tools/discovery-and-registration/ndi-discovery-service).
+- Check firewall: System Settings → Network → Firewall — allow OBS (and
+  ndi-bar) on the local network.
+- Restart the NDI plugin's discovery: in OBS, Tools → NDI™ Plugin Settings
+  → Main Output: off, then on again.
+
+### Other NDI-compatible receivers
+
+Same discovery story applies to all of these — the ndi-bar source just
+shows up in whatever NDI picker they use:
+
+- **vMix**, **Wirecast**, **TriCaster** — broadcast/studio switchers
+- **Resolume Arena**, **TouchDesigner**, **Notch** — live visuals
+- **Zoom** with NDI plugin enabled
+- Any other app that lists NDI Tools' SDK as a supported input
+
 ## Cutting a signed + notarized release
 
 For public GitHub releases (so other people get a silent-launch .app on any
