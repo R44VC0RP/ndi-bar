@@ -238,11 +238,13 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     @objc private func grantPermissionAction() {
-        controller.requestScreenRecordingPermission()
-        // Ask macOS to open the Settings pane too — if the user already
-        // has a stale "granted" record, the prompt won't appear and they
-        // need to toggle it off/on in Settings to rebind TCC.
-        controller.openScreenRecordingSettings()
+        // Fire-and-forget: the controller handles probing TCC and requesting
+        // access. We intentionally do NOT open System Settings from here —
+        // that would steal focus from macOS's native prompt. The menu offers
+        // a separate "Open Privacy Settings…" item for the manual path.
+        Task { @MainActor in
+            await controller.requestScreenRecordingPermission()
+        }
     }
 
     @objc private func openPrivacySettingsAction() {

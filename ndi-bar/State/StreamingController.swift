@@ -251,14 +251,32 @@ final class StreamingController: ObservableObject {
 
     // MARK: Permissions
 
-    /// Triggers macOS's own screen-recording prompt via CGRequestScreenCaptureAccess.
-    /// Pairs with `openScreenRecordingSettings()` for the fallback path.
+    /// Kicks macOS into actually adding us to the Screen Recording TCC list
+    /// and (when in the "not determined" state) showing its native prompt.
     ///
-    /// On ad-hoc signed builds, newly granted permission frequently won't
-    /// take effect until the process is relaunched (TCC evaluates at startup).
-    /// Callers should expect this and surface a restart hint if needed.
-    func requestScreenRecordingPermission() {
+    /// Two APIs are involved for a reason:
+    ///   1. `CGRequestScreenCaptureAccess` — the documented hook. Shows the
+    ///      native prompt only when TCC has no record yet.
+    ///   2. `SCShareableContent.excludingDesktopWindows` — the API that
+    ///      actually forces TCC to register the app. Without an explicit
+    ///      capture attempt, `CGRequestScreenCaptureAccess` alone can be
+    ///      a no-op and the app never appears in the Settings list.
+    ///
+    /// We do NOT open System Settings automatically — doing so steals focus
+    /// from the native prompt if one is about to appear. The menu provides a
+    /// separate "Open Privacy Settings…" item for manual recovery.
+    ///
+    /// On ad-hoc signed builds, newly granted permission usually won't take
+    /// effect until the process is relaunched (TCC evaluates at startup).
+    func requestScreenRecordingPermission() async {
         _ = CGRequestScreenCaptureAccess()
+        do {
+            _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        } catch {
+            // Expected to throw the first time — the thrown error is the
+            // side effect that registers us in TCC so we appear in Settings.
+            NSLog("[ndi-bar] permission probe: \(error.localizedDescription)")
+        }
         refreshPermissionState()
     }
 
