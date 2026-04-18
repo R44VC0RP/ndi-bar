@@ -84,25 +84,26 @@ fast and ad-hoc signed for local development.
 
 ndi-bar is ad-hoc signed during local development (`CODE_SIGN_IDENTITY: "-"`).
 Every rebuild changes the binary's `cdhash`, and macOS 14+ TCC binds the
-Screen Recording grant to that hash. After a `make install`:
+Screen Recording grant to that hash. Without intervention, the
+System Settings toggle stays *on* while `CGPreflightScreenCaptureAccess()`
+quietly returns *false*, and the menubar icon becomes a warning triangle.
 
-- The toggle in **System Settings → Privacy & Security → Screen & System
-  Audio Recording** will still show *on* for ndi-bar.
-- But `CGPreflightScreenCaptureAccess()` reports *false* because the hash
-  stored in TCC no longer matches the fresh binary.
+`make install` handles this automatically: it runs
+`tccutil reset ScreenCapture` right before launching the new build so
+macOS treats it as a first-time request. Click the menubar icon →
+**Grant Screen Recording** → Allow → relaunch.
 
-The menubar icon switches to a warning triangle when this happens and the
-menu shows a "Grant Screen Recording…" action. Easiest fixes:
+If things ever get stuck (stale grants from an older path, etc.), reset
+manually:
 
 ```sh
-# Clear the stale record, then relaunch and approve the macOS prompt:
 make reset-tcc
 open ~/Applications/ndi-bar.app
 ```
 
-Or manually: toggle ndi-bar *off* then *on* in the Settings pane and
-relaunch the app. A proper Developer ID signature would avoid this (TCC
-binds to Team ID instead of cdhash) — worth setting up before distributing.
+A proper Developer ID signature would avoid this entirely (TCC binds to
+Team ID instead of cdhash) — done via `make dist` when you're ready to
+distribute.
 
 ## Architecture
 

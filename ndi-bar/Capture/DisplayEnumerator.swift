@@ -11,9 +11,14 @@ struct DisplayInfo: Identifiable, Hashable {
     let scDisplay: SCDisplay
     /// Human-readable name: "Built-in Retina Display", "DELL U2723QE", etc.
     let localizedName: String
-    /// Native pixel dimensions (what ScreenCaptureKit will deliver at backing scale).
-    let pixelWidth: Int
-    let pixelHeight: Int
+    /// Logical resolution, in points. This matches what the user sees in
+    /// System Settings → Displays → "Use as …" and is what we configure
+    /// the SCStream output with: `SCStreamConfiguration.width/height` takes
+    /// pixels, but giving it the logical point count means macOS does the
+    /// HiDPI downsample for us and we ship a reasonable-size NDI frame
+    /// instead of the 2× framebuffer.
+    let width: Int
+    let height: Int
     /// Index in the display list (1-based) — stable for menubar labeling.
     let ordinal: Int
 
@@ -42,18 +47,11 @@ enum DisplayEnumerator {
 
         let ordered = content.displays.sorted { $0.displayID < $1.displayID }
         return ordered.enumerated().map { idx, d in
-            let backing = NSScreen.screens.first { screen in
-                (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == d.displayID
-            }?.backingScaleFactor ?? 2.0
-
-            let pxW = Int(CGFloat(d.width) * backing)
-            let pxH = Int(CGFloat(d.height) * backing)
-
             return DisplayInfo(
                 scDisplay: d,
                 localizedName: nameByID[d.displayID] ?? "Display \(idx + 1)",
-                pixelWidth: pxW,
-                pixelHeight: pxH,
+                width: d.width,
+                height: d.height,
                 ordinal: idx + 1
             )
         }

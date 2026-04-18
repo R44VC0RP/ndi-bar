@@ -23,8 +23,13 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
 
-                Toggle("Downscale to 1080p", isOn: $controller.limitTo1080p)
-                    .help("Leave on for the lightest bandwidth. Turn off to send native (e.g. 4K) resolution.")
+                Picker("Output resolution", selection: $controller.resolutionCap) {
+                    ForEach(OutputResolutionCap.allCases) { cap in
+                        Text(cap.displayName).tag(cap)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .help("Max output height. Aspect ratio is preserved; a display already under the cap is passed through at its native size.")
 
                 Toggle("Show cursor", isOn: $controller.showsCursor)
                 Toggle("Capture system audio", isOn: $controller.captureAudio)

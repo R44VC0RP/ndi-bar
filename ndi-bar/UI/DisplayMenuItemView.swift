@@ -147,7 +147,7 @@ final class DisplayMenuItemView: NSView {
     private static func titleString(display: DisplayInfo,
                                     isStreaming: Bool,
                                     viewers: Int) -> String {
-        let res = "\(display.pixelWidth)×\(display.pixelHeight)"
+        let res = "\(display.width)×\(display.height)"
         var s = "Monitor \(display.ordinal) · \(display.localizedName) · \(res)"
         if isStreaming {
             switch viewers {

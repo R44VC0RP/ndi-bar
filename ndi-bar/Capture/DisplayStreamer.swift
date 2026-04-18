@@ -121,8 +121,8 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
         let cfg = SCStreamConfiguration()
 
         // Dimensions
-        let nativeW = display.pixelWidth
-        let nativeH = display.pixelHeight
+        let nativeW = display.width
+        let nativeH = display.height
         let (outW, outH) = targetSize(forNativeWidth: nativeW, nativeHeight: nativeH)
         cfg.width  = outW
         cfg.height = outH

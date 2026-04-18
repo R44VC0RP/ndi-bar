@@ -153,6 +153,21 @@ xcodebuild -project ndi-bar.xcodeproj -scheme ndi-bar \
 - Do not distribute `libndi.dylib` inside the .app bundle; the app expects
   the user to install the SDK from ndi.video/sdk.
 
+## Ad-hoc TCC quirk (important for the install loop)
+- Every `make install` produces a new cdhash (ad-hoc signing is content-
+  addressable). macOS 14+ TCC binds the Screen Recording grant to cdhash,
+  so the stored grant becomes orphaned — the Settings toggle still shows
+  ON but `CGPreflightScreenCaptureAccess()` returns false.
+- `make install` therefore runs `tccutil reset ScreenCapture` right before
+  launching the freshly installed .app. This is intentional; do not
+  remove it. The reset means every install cycle leaves TCC in a "not
+  determined" state so `CGRequestScreenCaptureAccess()` actually shows
+  macOS's native prompt when the user clicks "Grant Screen Recording".
+- `make reset-tcc` exists as a standalone escape hatch (e.g. when debugging
+  a stale grant from a prior bundle id / install path).
+- When signing with a real Developer ID (`make dist`), TCC binds to Team
+  ID instead, and the reset-on-install hack is no longer necessary.
+
 ## Change Safety Checklist (for agents)
 - Run `make gen && make build` after code changes.
 - If you modify any file under `ndi-bar/` you usually don't need to re-run

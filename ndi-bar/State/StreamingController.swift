@@ -7,17 +7,48 @@ import AppKit
 import Combine
 import ScreenCaptureKit
 
+/// Max height the NDI output frame is scaled down to. Aspect ratio is
+/// preserved; a display already under the cap is passed through untouched.
+enum OutputResolutionCap: String, CaseIterable, Identifiable {
+    case native
+    case p1440
+    case p1080
+    case p720
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .native: return "Native"
+        case .p1440:  return "1440p"
+        case .p1080:  return "1080p"
+        case .p720:   return "720p"
+        }
+    }
+
+    /// Maximum output height in pixels, or nil for no downscale.
+    var maxHeight: Int? {
+        switch self {
+        case .native: return nil
+        case .p1440:  return 1440
+        case .p1080:  return 1080
+        case .p720:   return 720
+        }
+    }
+}
+
 @MainActor
 final class StreamingController: ObservableObject {
 
     // MARK: Persisted preferences
 
     private enum Keys {
-        static let sourcePrefix = "sourcePrefix"
-        static let fps          = "fps"
-        static let limitTo1080p = "limitTo1080p"
-        static let showsCursor  = "showsCursor"
-        static let captureAudio = "captureAudio"
+        static let sourcePrefix   = "sourcePrefix"
+        static let fps            = "fps"
+        static let resolutionCap  = "resolutionCap"
+        static let legacy1080pBool = "limitTo1080p"
+        static let showsCursor    = "showsCursor"
+        static let captureAudio   = "captureAudio"
     }
 
     @Published var sourcePrefix: String {
@@ -26,8 +57,8 @@ final class StreamingController: ObservableObject {
     @Published var fps: Int {
         didSet { UserDefaults.standard.set(fps, forKey: Keys.fps) }
     }
-    @Published var limitTo1080p: Bool {
-        didSet { UserDefaults.standard.set(limitTo1080p, forKey: Keys.limitTo1080p) }
+    @Published var resolutionCap: OutputResolutionCap {
+        didSet { UserDefaults.standard.set(resolutionCap.rawValue, forKey: Keys.resolutionCap) }
     }
     @Published var showsCursor: Bool {
         didSet { UserDefaults.standard.set(showsCursor, forKey: Keys.showsCursor) }
@@ -59,7 +90,22 @@ final class StreamingController: ObservableObject {
             let raw = d.integer(forKey: Keys.fps)
             return raw == 0 ? 60 : raw
         }()
-        self.limitTo1080p = d.object(forKey: Keys.limitTo1080p) as? Bool ?? true
+
+        // Preference migration: v0.1 stored a single bool, v0.2 stores an enum.
+        // If the old key exists, translate it once and remove it so we never
+        // fall back to the legacy path again.
+        if let raw = d.string(forKey: Keys.resolutionCap),
+           let cap = OutputResolutionCap(rawValue: raw) {
+            self.resolutionCap = cap
+        } else if let legacy = d.object(forKey: Keys.legacy1080pBool) as? Bool {
+            let migrated: OutputResolutionCap = legacy ? .p1080 : .native
+            self.resolutionCap = migrated
+            d.set(migrated.rawValue, forKey: Keys.resolutionCap)
+            d.removeObject(forKey: Keys.legacy1080pBool)
+        } else {
+            self.resolutionCap = .p1080
+        }
+
         self.showsCursor  = d.object(forKey: Keys.showsCursor)  as? Bool ?? true
         self.captureAudio = d.object(forKey: Keys.captureAudio) as? Bool ?? true
 
@@ -167,8 +213,8 @@ final class StreamingController: ObservableObject {
 
         let sourceName = ndiName(for: display)
         let quality = StreamQuality(
-            targetWidth:  limitTo1080p ? 1920 : nil,
-            targetHeight: limitTo1080p ? 1080 : nil,
+            targetWidth:  nil,
+            targetHeight: resolutionCap.maxHeight,
             fps: fps,
             capturesAudio: captureAudio,
             showsCursor: showsCursor
@@ -228,7 +274,7 @@ final class StreamingController: ObservableObject {
     // MARK: NDI naming
 
     private func ndiName(for display: DisplayInfo) -> String {
-        let resStr = "\(display.pixelWidth)×\(display.pixelHeight)"
+        let resStr = "\(display.width)×\(display.height)"
         return "\(sourcePrefix) – Display \(display.ordinal) (\(display.localizedName) \(resStr))"
     }
 }
