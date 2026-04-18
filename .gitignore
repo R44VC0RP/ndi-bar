@@ -1,0 +1,44 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode
+build/
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# xcodegen output — regenerated from project.yml, don't commit
+ndi-bar.xcodeproj/
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+Package.resolved
+.swiftpm/
+
+# CocoaPods (unused, but just in case)
+Pods/
+
+# Release artifacts
+dist/
+*.zip
+*.zip.sha256
+
+# Editor / tooling
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
