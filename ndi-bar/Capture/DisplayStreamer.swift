@@ -148,10 +148,12 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
         return cfg
     }
 
-    /// Computes output dimensions that keep aspect ratio but cap to the
-    /// quality target height if set. Never upscales.
+    /// Computes output dimensions that keep aspect ratio for the given
+    /// quality target height. Applies for both upscale and downscale —
+    /// SCStream captures at the physical Retina resolution and scales to
+    /// whatever cfg.width/height is set to (scalesToFit = true).
     private func targetSize(forNativeWidth w: Int, nativeHeight h: Int) -> (Int, Int) {
-        guard let targetH = quality.targetHeight, targetH > 0, targetH < h else {
+        guard let targetH = quality.targetHeight, targetH > 0 else {
             return (w, h)
         }
         let ratio = Double(w) / Double(max(h, 1))
