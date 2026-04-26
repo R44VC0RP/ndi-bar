@@ -2,8 +2,9 @@
 // Owns one SCStream + one NDISender for a single display.
 //
 // Pipeline:
-//   SCStream (BGRA, 60 fps) ─┬─► SCStreamOutput .screen  ─► NDISender.sendVideo
-//                            └─► SCStreamOutput .audio   ─► NDISender.sendAudio
+//   SCStream (BGRA, 60 fps) ─┬─► SCStreamOutput .screen      ─► NDISender.sendVideo
+//                            ├─► SCStreamOutput .audio       ┐
+//                            └─► SCStreamOutput .microphone  ┴─► NDISender.sendAudio
 //
 // Callbacks fire on a dedicated serial queue so we never touch the main actor
 // from the hot path.
@@ -32,17 +33,23 @@ struct StreamQuality: Equatable {
     var fps: Int
     /// Whether to capture system audio alongside video.
     var capturesAudio: Bool
+    /// Whether to capture microphone audio alongside video.
+    var capturesMicrophone: Bool
+    /// `nil` uses the system default input device.
+    var microphoneDeviceID: String?
     /// Whether the hardware cursor is drawn into the frame.
     var showsCursor: Bool
 
     static let default1080p60 = StreamQuality(
         targetWidth: 1920, targetHeight: 1080, fps: 60,
-        capturesAudio: true, showsCursor: true
+        capturesAudio: true, capturesMicrophone: false, microphoneDeviceID: nil,
+        showsCursor: true
     )
 
     static let nativeResolution60 = StreamQuality(
         targetWidth: nil, targetHeight: nil, fps: 60,
-        capturesAudio: true, showsCursor: true
+        capturesAudio: true, capturesMicrophone: false, microphoneDeviceID: nil,
+        showsCursor: true
     )
 }
 
@@ -62,6 +69,7 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
 
     private var stream: SCStream?
     private var sender: NDISender?
+    private let audioMixer = AudioFrameMixer()
 
     /// Exposed so the UI can show "2 viewers" etc.
     private(set) var connectionCount: Int32 = 0
@@ -96,6 +104,11 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
         if quality.capturesAudio {
             try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         }
+        if quality.capturesMicrophone {
+            if #available(macOS 15.0, *) {
+                try s.addStreamOutput(self, type: .microphone, sampleHandlerQueue: audioQueue)
+            }
+        }
 
         try await s.startCapture()
         NSLog("[ndi-bar] started streaming '\(ndiSourceName)'")
@@ -111,6 +124,7 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
         }
         stream = nil
         sender = nil
+        audioMixer.reset()
         connectionCount = 0
         NSLog("[ndi-bar] stopped streaming '\(ndiSourceName)'")
     }
@@ -138,11 +152,19 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
         cfg.queueDepth = 6
 
         // Audio
-        if quality.capturesAudio {
-            cfg.capturesAudio = true
+        if quality.capturesAudio || quality.capturesMicrophone {
             cfg.sampleRate = 48000
             cfg.channelCount = 2
+        }
+        if quality.capturesAudio {
+            cfg.capturesAudio = true
             cfg.excludesCurrentProcessAudio = true
+        }
+        if quality.capturesMicrophone, Self.supportsMicrophoneCapture {
+            if #available(macOS 15.0, *) {
+                cfg.captureMicrophone = true
+                cfg.microphoneCaptureDeviceID = quality.microphoneDeviceID
+            }
         }
 
         return cfg
@@ -188,10 +210,18 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
             connectionCount = sender.connectionCount
 
         case .audio:
-            sender.sendAudio(sampleBuffer: sampleBuffer)
+            if capturesBothAudioInputs {
+                audioMixer.appendSystemAudio(sampleBuffer, sender: sender)
+            } else {
+                sender.sendAudio(sampleBuffer: sampleBuffer)
+            }
 
         case .microphone:
-            break
+            if capturesBothAudioInputs {
+                audioMixer.appendMicrophoneAudio(sampleBuffer, sender: sender)
+            } else {
+                sender.sendAudio(sampleBuffer: sampleBuffer)
+            }
 
         @unknown default:
             break
@@ -211,6 +241,60 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
                 "error": error
             ]
         )
+    }
+
+    private var capturesBothAudioInputs: Bool {
+        quality.capturesAudio && quality.capturesMicrophone && Self.supportsMicrophoneCapture
+    }
+
+    static var supportsMicrophoneCapture: Bool {
+        if #available(macOS 15.0, *) { return true }
+        return false
+    }
+}
+
+private final class AudioFrameMixer {
+    private var systemQueue: [NDIAudioFrame] = []
+    private var microphoneQueue: [NDIAudioFrame] = []
+
+    func appendSystemAudio(_ sampleBuffer: CMSampleBuffer, sender: NDISender) {
+        guard let frame = NDIAudioFrame(sampleBuffer: sampleBuffer) else { return }
+        systemQueue.append(frame)
+        drain(sender: sender)
+    }
+
+    func appendMicrophoneAudio(_ sampleBuffer: CMSampleBuffer, sender: NDISender) {
+        guard let frame = NDIAudioFrame(sampleBuffer: sampleBuffer) else { return }
+        microphoneQueue.append(frame)
+        drain(sender: sender)
+    }
+
+    func reset() {
+        systemQueue.removeAll(keepingCapacity: true)
+        microphoneQueue.removeAll(keepingCapacity: true)
+    }
+
+    private func drain(sender: NDISender) {
+        while !systemQueue.isEmpty && !microphoneQueue.isEmpty {
+            let system = systemQueue.removeFirst()
+            let microphone = microphoneQueue.removeFirst()
+
+            if let mixed = system.mixed(with: microphone) {
+                sender.sendAudio(mixed)
+            } else {
+                sender.sendAudio(system)
+                sender.sendAudio(microphone)
+            }
+        }
+
+        // Keep one unmatched frame as a short alignment buffer. If the other
+        // input is absent or delayed, older frames are still sent live.
+        while systemQueue.count > 1 {
+            sender.sendAudio(systemQueue.removeFirst())
+        }
+        while microphoneQueue.count > 1 {
+            sender.sendAudio(microphoneQueue.removeFirst())
+        }
     }
 }
 

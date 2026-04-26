@@ -7,6 +7,11 @@ struct SettingsView: View {
     @ObservedObject var controller: StreamingController
 
     var body: some View {
+        let microphoneSelection = Binding<String>(
+            get: { controller.selectedMicrophoneDeviceID },
+            set: { controller.selectMicrophoneDevice($0) }
+        )
+
         Form {
             Section("NDI source") {
                 TextField("Source prefix", text: $controller.sourcePrefix)
@@ -34,6 +39,41 @@ struct SettingsView: View {
                 Toggle("Show cursor", isOn: $controller.showsCursor)
                 Toggle("Capture system audio", isOn: $controller.captureAudio)
                     .help("Uses ScreenCaptureKit's built-in system audio tap. No BlackHole needed.")
+                Toggle("Capture microphone", isOn: $controller.captureMicrophone)
+                    .disabled(!controller.microphoneCaptureSupported)
+                    .help("Mixes the selected microphone with system audio when both are enabled.")
+
+                Picker("Microphone", selection: microphoneSelection) {
+                    Text("System Default").tag(MicrophoneDevice.systemDefaultID)
+                    if controller.selectedMicrophoneDeviceUnavailable {
+                        Text("Unavailable selected microphone").tag(controller.selectedMicrophoneDeviceID)
+                    }
+                    ForEach(controller.microphoneDevices) { device in
+                        Text(device.name).tag(device.id)
+                    }
+                }
+                .disabled(!controller.microphoneCaptureSupported || !controller.captureMicrophone)
+                .help("Selects which audio input ScreenCaptureKit uses for microphone capture.")
+
+                if !controller.microphoneCaptureSupported {
+                    Text("Microphone capture requires macOS 15 or later.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if controller.captureMicrophone && controller.selectedMicrophoneDeviceUnavailable {
+                    Text("The selected microphone is not connected. Choose another input or System Default.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if controller.captureMicrophone && !controller.microphonePermissionGranted {
+                    HStack(spacing: 8) {
+                        Text("Microphone access is required before streaming.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Open Privacy Settings") {
+                            controller.openMicrophoneSettings()
+                        }
+                    }
+                }
             }
 
             Section("NDI") {
@@ -54,6 +94,9 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
-        .frame(minWidth: 440, minHeight: 380)
+        .frame(minWidth: 440, minHeight: 420)
+        .onAppear {
+            controller.refreshMicrophones()
+        }
     }
 }

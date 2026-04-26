@@ -4,6 +4,7 @@
 
 import Foundation
 import AppKit
+import AVFoundation
 import Combine
 import ScreenCaptureKit
 
@@ -37,6 +38,13 @@ enum OutputResolutionCap: String, CaseIterable, Identifiable {
     }
 }
 
+struct MicrophoneDevice: Identifiable, Equatable {
+    static let systemDefaultID = "__ndi_bar_system_default_microphone__"
+
+    let id: String
+    let name: String
+}
+
 @MainActor
 final class StreamingController: ObservableObject {
 
@@ -49,6 +57,8 @@ final class StreamingController: ObservableObject {
         static let legacy1080pBool = "limitTo1080p"
         static let showsCursor    = "showsCursor"
         static let captureAudio   = "captureAudio"
+        static let captureMicrophone = "captureMicrophone"
+        static let selectedMicrophoneDeviceID = "selectedMicrophoneDeviceID"
     }
 
     @Published var sourcePrefix: String {
@@ -66,10 +76,23 @@ final class StreamingController: ObservableObject {
     @Published var captureAudio: Bool {
         didSet { UserDefaults.standard.set(captureAudio, forKey: Keys.captureAudio) }
     }
+    @Published var captureMicrophone: Bool {
+        didSet { UserDefaults.standard.set(captureMicrophone, forKey: Keys.captureMicrophone) }
+    }
+    @Published var selectedMicrophoneDeviceID: String {
+        didSet {
+            if selectedMicrophoneDeviceID == MicrophoneDevice.systemDefaultID {
+                UserDefaults.standard.removeObject(forKey: Keys.selectedMicrophoneDeviceID)
+            } else {
+                UserDefaults.standard.set(selectedMicrophoneDeviceID, forKey: Keys.selectedMicrophoneDeviceID)
+            }
+        }
+    }
 
     // MARK: Observable state
 
     @Published private(set) var displays: [DisplayInfo] = []
+    @Published private(set) var microphoneDevices: [MicrophoneDevice] = []
     @Published private(set) var activeDisplayIDs: Set<CGDirectDisplayID> = []
     @Published private(set) var ndiReady: Bool = false
     @Published private(set) var lastError: String?
@@ -77,6 +100,18 @@ final class StreamingController: ObservableObject {
     /// This is the source of truth; the System Settings toggle can look "on"
     /// while still being denied if the app was ad-hoc signed and rebuilt.
     @Published private(set) var screenRecordingGranted: Bool = CGPreflightScreenCaptureAccess()
+    @Published private(set) var microphonePermissionGranted: Bool = {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }()
+
+    var microphoneCaptureSupported: Bool {
+        DisplayStreamer.supportsMicrophoneCapture
+    }
+
+    var selectedMicrophoneDeviceUnavailable: Bool {
+        selectedMicrophoneDeviceID != MicrophoneDevice.systemDefaultID &&
+            !microphoneDevices.contains { $0.id == selectedMicrophoneDeviceID }
+    }
 
     // MARK: Internals
 
@@ -108,6 +143,8 @@ final class StreamingController: ObservableObject {
 
         self.showsCursor  = d.object(forKey: Keys.showsCursor)  as? Bool ?? true
         self.captureAudio = d.object(forKey: Keys.captureAudio) as? Bool ?? true
+        self.captureMicrophone = d.object(forKey: Keys.captureMicrophone) as? Bool ?? false
+        self.selectedMicrophoneDeviceID = d.string(forKey: Keys.selectedMicrophoneDeviceID) ?? MicrophoneDevice.systemDefaultID
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -146,6 +183,7 @@ final class StreamingController: ObservableObject {
             NSLog("[ndi-bar] NDI load failed: \(error.localizedDescription)")
         }
         refreshPermissionState()
+        refreshMicrophones()
         await refreshDisplays()
     }
 
@@ -154,6 +192,28 @@ final class StreamingController: ObservableObject {
     /// normally doesn't change mid-session.
     func refreshPermissionState() {
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
+        microphonePermissionGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }
+
+    func refreshMicrophones() {
+        guard microphoneCaptureSupported else {
+            microphoneDevices = []
+            return
+        }
+
+        let session = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        microphoneDevices = session.devices.map {
+            MicrophoneDevice(id: $0.uniqueID, name: $0.localizedName)
+        }
+    }
+
+    func selectMicrophoneDevice(_ id: String) {
+        selectedMicrophoneDeviceID = id
+        refreshMicrophones()
     }
 
     // MARK: Display enumeration
@@ -210,6 +270,7 @@ final class StreamingController: ObservableObject {
             return
         }
         if streamers[display.id] != nil { return }
+        guard await ensureMicrophoneReadyIfNeeded() else { return }
 
         let sourceName = ndiName(for: display)
         let quality = StreamQuality(
@@ -217,6 +278,8 @@ final class StreamingController: ObservableObject {
             targetHeight: resolutionCap.maxHeight,
             fps: fps,
             capturesAudio: captureAudio,
+            capturesMicrophone: captureMicrophone,
+            microphoneDeviceID: activeMicrophoneCaptureDeviceID,
             showsCursor: showsCursor
         )
         let streamer = DisplayStreamer(
@@ -289,6 +352,63 @@ final class StreamingController: ObservableObject {
         }
     }
 
+    func requestMicrophonePermission() async {
+        _ = await AVCaptureDevice.requestAudioAccess()
+        refreshPermissionState()
+    }
+
+    func openMicrophoneSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func ensureMicrophoneReadyIfNeeded() async -> Bool {
+        guard captureMicrophone else { return true }
+        guard microphoneCaptureSupported else {
+            lastError = "Microphone capture requires macOS 15 or later."
+            return false
+        }
+
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            microphonePermissionGranted = true
+            refreshMicrophones()
+            return ensureSelectedMicrophoneAvailable()
+        case .notDetermined:
+            let granted = await AVCaptureDevice.requestAudioAccess()
+            microphonePermissionGranted = granted
+            if !granted {
+                lastError = "Microphone permission was not granted."
+            }
+            refreshMicrophones()
+            return granted && ensureSelectedMicrophoneAvailable()
+        case .denied, .restricted:
+            microphonePermissionGranted = false
+            lastError = "Microphone permission is denied. Enable it in System Settings → Privacy & Security → Microphone."
+            return false
+        @unknown default:
+            microphonePermissionGranted = false
+            lastError = "Microphone permission state is unknown."
+            return false
+        }
+    }
+
+    private var activeMicrophoneCaptureDeviceID: String? {
+        guard selectedMicrophoneDeviceID != MicrophoneDevice.systemDefaultID else { return nil }
+        guard microphoneDevices.contains(where: { $0.id == selectedMicrophoneDeviceID }) else { return nil }
+        return selectedMicrophoneDeviceID
+    }
+
+    private func ensureSelectedMicrophoneAvailable() -> Bool {
+        guard selectedMicrophoneDeviceID != MicrophoneDevice.systemDefaultID else { return true }
+        if microphoneDevices.contains(where: { $0.id == selectedMicrophoneDeviceID }) {
+            return true
+        }
+        lastError = "Selected microphone is not available. Choose another microphone or use System Default."
+        return false
+    }
+
     // MARK: NDI naming
 
     private func ndiName(for display: DisplayInfo) -> String {
@@ -319,5 +439,15 @@ private enum Host {
             return name.isEmpty ? nil : name
         }
         return nil
+    }
+}
+
+private extension AVCaptureDevice {
+    static func requestAudioAccess() async -> Bool {
+        await withCheckedContinuation { continuation in
+            requestAccess(for: .audio) { granted in
+                continuation.resume(returning: granted)
+            }
+        }
     }
 }

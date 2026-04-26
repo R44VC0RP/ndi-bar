@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>ndi-bar is independent software. NDI® is a registered trademark of Vizrt NDI AB.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ndi-bar can capture microphone audio and broadcast it over NDI when enabled in Settings.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>ndi-bar needs screen recording permission to capture displays and broadcast them over NDI.</string>
 </dict>

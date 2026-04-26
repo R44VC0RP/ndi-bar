@@ -67,6 +67,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     // MARK: Menu build
 
     func menuWillOpen(_ menu: NSMenu) {
+        controller.refreshMicrophones()
         Task { await controller.refreshDisplays() }
         rebuild(menu: menu)
     }
@@ -162,6 +163,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        if controller.microphoneCaptureSupported {
+            addMicrophoneSection(to: menu)
+            menu.addItem(.separator())
+        }
+
         let stopAll = NSMenuItem(
             title: "Stop All Streams",
             action: #selector(stopAllAction),
@@ -221,6 +227,58 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         return item
     }
 
+    private func addMicrophoneSection(to menu: NSMenu) {
+        let header = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+
+        let capture = NSMenuItem(
+            title: "Capture Microphone",
+            action: #selector(toggleCaptureMicrophoneAction),
+            keyEquivalent: ""
+        )
+        capture.target = self
+        capture.state = controller.captureMicrophone ? .on : .off
+        menu.addItem(capture)
+
+        let systemDefault = makeMicrophoneItem(
+            title: "System Default",
+            id: MicrophoneDevice.systemDefaultID
+        )
+        menu.addItem(systemDefault)
+
+        if controller.selectedMicrophoneDeviceUnavailable {
+            let unavailable = makeMicrophoneItem(
+                title: "Unavailable selected microphone",
+                id: controller.selectedMicrophoneDeviceID
+            )
+            unavailable.isEnabled = false
+            menu.addItem(unavailable)
+        }
+
+        if controller.microphoneDevices.isEmpty {
+            let empty = NSMenuItem(title: "No microphones detected", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            for device in controller.microphoneDevices {
+                menu.addItem(makeMicrophoneItem(title: device.name, id: device.id))
+            }
+        }
+    }
+
+    private func makeMicrophoneItem(title: String, id: String) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: title,
+            action: #selector(selectMicrophoneAction),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.representedObject = id
+        item.state = controller.selectedMicrophoneDeviceID == id ? .on : .off
+        return item
+    }
+
     // MARK: Actions
 
     @objc private func stopAllAction() {
@@ -229,6 +287,16 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     @objc private func openSettingsAction() {
         openSettings()
+    }
+
+    @objc private func toggleCaptureMicrophoneAction() {
+        controller.captureMicrophone.toggle()
+        controller.refreshMicrophones()
+    }
+
+    @objc private func selectMicrophoneAction(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        controller.selectMicrophoneDevice(id)
     }
 
     @objc private func openNDIDownload() {

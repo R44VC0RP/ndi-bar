@@ -74,8 +74,9 @@ install: gen
 	rm -rf "$(INSTALL_DIR)/ndi-bar.app"; \
 	cp -R "$$APP_PATH" "$(INSTALL_DIR)/ndi-bar.app"; \
 	echo "Installed to $(INSTALL_DIR)/ndi-bar.app"; \
-	echo "Resetting TCC so the fresh cdhash gets a clean Screen Recording grant…"; \
+	echo "Resetting TCC so the fresh cdhash gets clean media grants…"; \
 	tccutil reset ScreenCapture com.ryanvogel.ndi-bar >/dev/null 2>&1 || true; \
+	tccutil reset Microphone com.ryanvogel.ndi-bar >/dev/null 2>&1 || true; \
 	open "$(INSTALL_DIR)/ndi-bar.app"; \
 	echo ""; \
 	echo "Click the menubar icon → Grant Screen Recording → Allow, then relaunch."
@@ -91,7 +92,8 @@ uninstall:
 reset-tcc:
 	@pkill -x ndi-bar 2>/dev/null; sleep 0.3
 	tccutil reset ScreenCapture com.ryanvogel.ndi-bar
-	@echo "Relaunch ndi-bar and grant Screen Recording when macOS prompts."
+	tccutil reset Microphone com.ryanvogel.ndi-bar
+	@echo "Relaunch ndi-bar and grant Screen Recording / Microphone when macOS prompts."
 
 # -----------------------------------------------------------------------------
 # Release distribution

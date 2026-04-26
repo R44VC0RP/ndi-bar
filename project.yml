@@ -33,6 +33,7 @@ targets:
       properties:
         com.apple.security.app-sandbox: false
         com.apple.security.cs.disable-library-validation: true
+        com.apple.security.device.audio-input: true
         com.apple.security.network.server: true
         com.apple.security.network.client: true
     info:
@@ -46,6 +47,7 @@ targets:
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSUIElement: true
         NSHighResolutionCapable: true
+        NSMicrophoneUsageDescription: "ndi-bar can capture microphone audio and broadcast it over NDI when enabled in Settings."
         NSScreenCaptureUsageDescription: "ndi-bar needs screen recording permission to capture displays and broadcast them over NDI."
         NSHumanReadableCopyright: "ndi-bar is independent software. NDI® is a registered trademark of Vizrt NDI AB."
     settings:

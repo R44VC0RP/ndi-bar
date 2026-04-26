@@ -73,14 +73,59 @@ final class NDISender {
     /// Ships a CMSampleBuffer of PCM audio as planar-float NDI audio.
     /// Accepts 16-bit or float, interleaved or planar; we normalize to planar Float32.
     func sendAudio(sampleBuffer: CMSampleBuffer) {
+        guard let audio = NDIAudioFrame(sampleBuffer: sampleBuffer) else { return }
+        sendAudio(audio)
+    }
+
+    /// Ships already-normalized planar Float32 audio.
+    func sendAudio(_ audio: NDIAudioFrame) {
+        guard audio.channels > 0,
+              audio.sampleCount > 0,
+              audio.planarSamples.count >= audio.channels * audio.sampleCount else {
+            return
+        }
+
+        var samples = audio.planarSamples
+        samples.withUnsafeMutableBufferPointer { ptr in
+            guard let base = ptr.baseAddress else { return }
+
+            var frame = NDIlib_audio_frame_v3_t(
+                sampleRate: Int32(audio.sampleRate),
+                channels: Int32(audio.channels),
+                samples: Int32(audio.sampleCount),
+                data: UnsafeMutableRawPointer(base),
+                channelStrideBytes: Int32(audio.sampleCount * MemoryLayout<Float32>.size)
+            )
+
+            lib.sendAudio(handle, frame: &frame)
+        }
+    }
+}
+
+/// Planar Float32 audio ready for NDI. Samples are stored as
+/// [channel 0][channel 1]... with `sampleCount` samples per channel.
+struct NDIAudioFrame {
+    let sampleRate: Double
+    let channels: Int
+    let sampleCount: Int
+    let planarSamples: [Float32]
+
+    init(sampleRate: Double, channels: Int, sampleCount: Int, planarSamples: [Float32]) {
+        self.sampleRate = sampleRate
+        self.channels = channels
+        self.sampleCount = sampleCount
+        self.planarSamples = planarSamples
+    }
+
+    init?(sampleBuffer: CMSampleBuffer) {
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
-            return
+            return nil
         }
         let asbd = asbdPtr.pointee
         let channels = Int(asbd.mChannelsPerFrame)
         let numSamples = CMSampleBufferGetNumSamples(sampleBuffer)
-        guard channels > 0, numSamples > 0 else { return }
+        guard channels > 0, numSamples > 0 else { return nil }
 
         // Grab the AudioBufferList from the sample buffer.
         var bufferListSize: Int = 0
@@ -95,7 +140,7 @@ final class NDISender {
             flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
             blockBufferOut: &blockBuffer
         )
-        guard status0 == noErr, bufferListSize > 0 else { return }
+        guard status0 == noErr, bufferListSize > 0 else { return nil }
 
         let rawABL = UnsafeMutableRawPointer.allocate(
             byteCount: bufferListSize,
@@ -113,7 +158,7 @@ final class NDISender {
             flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
             blockBufferOut: &blockBuffer
         )
-        guard status1 == noErr else { return }
+        guard status1 == noErr else { return nil }
 
         let ablPtr = UnsafeMutableAudioBufferListPointer(
             rawABL.assumingMemoryBound(to: AudioBufferList.self)
@@ -123,55 +168,88 @@ final class NDISender {
         let isFloat  = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
         let bitsPerChannel = Int(asbd.mBitsPerChannel)
 
-        // Allocate a contiguous planar float buffer: [ch0 samples][ch1 samples]...
-        let channelStrideBytes = numSamples * MemoryLayout<Float32>.size
-        let totalBytes = channels * channelStrideBytes
-        let plane = UnsafeMutableRawPointer.allocate(byteCount: totalBytes, alignment: 16)
-        defer { plane.deallocate() }
-
-        let floatPlane = plane.assumingMemoryBound(to: Float32.self)
+        var planarSamples = Array(repeating: Float32.zero, count: channels * numSamples)
 
         // Convert into planar Float32
-        if isPlanar, isFloat, bitsPerChannel == 32 {
-            // Already planar Float32 — copy channel by channel.
-            for c in 0..<channels {
-                guard c < ablPtr.count,
-                      let src = ablPtr[c].mData else { continue }
-                let dst = floatPlane.advanced(by: c * numSamples)
-                memcpy(dst, src, min(Int(ablPtr[c].mDataByteSize), channelStrideBytes))
-            }
-        } else if !isPlanar, isFloat, bitsPerChannel == 32 {
-            // Interleaved Float32
-            guard let src = ablPtr[0].mData?.assumingMemoryBound(to: Float32.self) else { return }
-            for c in 0..<channels {
-                let dst = floatPlane.advanced(by: c * numSamples)
-                for s in 0..<numSamples {
-                    dst[s] = src[s * channels + c]
+        planarSamples.withUnsafeMutableBufferPointer { out in
+            guard let outBase = out.baseAddress else { return }
+
+            if isPlanar, isFloat, bitsPerChannel == 32 {
+                // Already planar Float32 — copy channel by channel.
+                for c in 0..<channels {
+                    guard c < ablPtr.count,
+                          let src = ablPtr[c].mData else { continue }
+                    let copyCount = min(Int(ablPtr[c].mDataByteSize) / MemoryLayout<Float32>.size, numSamples)
+                    let dst = outBase.advanced(by: c * numSamples)
+                    memcpy(dst, src, copyCount * MemoryLayout<Float32>.size)
+                }
+            } else if !isPlanar, isFloat, bitsPerChannel == 32 {
+                // Interleaved Float32
+                guard let src = ablPtr[0].mData?.assumingMemoryBound(to: Float32.self) else { return }
+                for c in 0..<channels {
+                    let dst = outBase.advanced(by: c * numSamples)
+                    for s in 0..<numSamples {
+                        dst[s] = src[s * channels + c]
+                    }
+                }
+            } else if isPlanar, !isFloat, bitsPerChannel == 16 {
+                // Planar Int16 — scale to [-1, 1]
+                let inv = Float32(1.0 / 32768.0)
+                for c in 0..<channels {
+                    guard c < ablPtr.count,
+                          let src = ablPtr[c].mData?.assumingMemoryBound(to: Int16.self) else { continue }
+                    let dst = outBase.advanced(by: c * numSamples)
+                    let copyCount = min(Int(ablPtr[c].mDataByteSize) / MemoryLayout<Int16>.size, numSamples)
+                    for s in 0..<copyCount {
+                        dst[s] = Float32(src[s]) * inv
+                    }
+                }
+            } else if !isPlanar, !isFloat, bitsPerChannel == 16 {
+                // Interleaved Int16 — scale to [-1, 1]
+                guard let src = ablPtr[0].mData?.assumingMemoryBound(to: Int16.self) else { return }
+                let inv = Float32(1.0 / 32768.0)
+                for c in 0..<channels {
+                    let dst = outBase.advanced(by: c * numSamples)
+                    for s in 0..<numSamples {
+                        dst[s] = Float32(src[s * channels + c]) * inv
+                    }
                 }
             }
-        } else if !isPlanar, !isFloat, bitsPerChannel == 16 {
-            // Interleaved Int16 — scale to [-1, 1]
-            guard let src = ablPtr[0].mData?.assumingMemoryBound(to: Int16.self) else { return }
-            let inv = Float32(1.0 / 32768.0)
-            for c in 0..<channels {
-                let dst = floatPlane.advanced(by: c * numSamples)
-                for s in 0..<numSamples {
-                    dst[s] = Float32(src[s * channels + c]) * inv
-                }
-            }
-        } else {
-            // Unknown layout — best effort zero and bail.
-            memset(plane, 0, totalBytes)
         }
 
-        var audio = NDIlib_audio_frame_v3_t(
-            sampleRate: Int32(asbd.mSampleRate),
-            channels: Int32(channels),
-            samples: Int32(numSamples),
-            data: plane,
-            channelStrideBytes: Int32(channelStrideBytes)
+        self.init(
+            sampleRate: asbd.mSampleRate,
+            channels: channels,
+            sampleCount: numSamples,
+            planarSamples: planarSamples
         )
+    }
 
-        lib.sendAudio(handle, frame: &audio)
+    func mixed(with other: NDIAudioFrame) -> NDIAudioFrame? {
+        guard sampleRate == other.sampleRate,
+              channels == other.channels else {
+            return nil
+        }
+
+        let mixedSampleCount = min(sampleCount, other.sampleCount)
+        guard mixedSampleCount > 0 else { return nil }
+
+        var mixed = Array(repeating: Float32.zero, count: channels * mixedSampleCount)
+        for c in 0..<channels {
+            let thisOffset = c * sampleCount
+            let otherOffset = c * other.sampleCount
+            let mixedOffset = c * mixedSampleCount
+            for s in 0..<mixedSampleCount {
+                let sample = planarSamples[thisOffset + s] + other.planarSamples[otherOffset + s]
+                mixed[mixedOffset + s] = max(-1, min(1, sample))
+            }
+        }
+
+        return NDIAudioFrame(
+            sampleRate: sampleRate,
+            channels: channels,
+            sampleCount: mixedSampleCount,
+            planarSamples: mixed
+        )
     }
 }

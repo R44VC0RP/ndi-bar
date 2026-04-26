@@ -14,6 +14,12 @@ One menubar icon. One click to start streaming Monitor 1, 2, 3, or 4.
   ✓ Monitor 2 · DELL U2723QE    · 3840×2160  ·  2 viewers
     Monitor 3 · LG UltraFine    · 2560×1440
 ─────
+  Microphone
+  ✓ Capture Microphone
+    System Default
+  ✓ MacBook Pro Microphone
+    Elgato Wave:3
+─────
   Stop All Streams            ⌘.
 ─────
   Settings…                   ⌘,
@@ -25,7 +31,8 @@ One menubar icon. One click to start streaming Monitor 1, 2, 3, or 4.
 
 v0.1.0 scaffold. Compiles, runs, and should light up an NDI source per
 selected display. Audio capture uses ScreenCaptureKit's built-in system-audio
-tap (no virtual audio device required).
+tap (no virtual audio device required), with optional selectable microphone
+capture on macOS 15 or later.
 
 ## Requirements
 
@@ -34,6 +41,7 @@ tap (no virtual audio device required).
 - [NDI SDK for Apple](https://ndi.video/sdk) installed at
   `/Library/NDI SDK for Apple/` — free from ndi.video
 - Screen Recording permission (macOS will prompt on first launch)
+- Microphone permission if microphone capture is enabled (macOS 15+)
 
 ## Build & install
 
@@ -45,6 +53,22 @@ make install    # Release-builds and copies ndi-bar.app into ~/Applications
 make run        # builds Debug and launches from DerivedData
 make kill       # stop the running menubar app
 ```
+
+## Microphone capture
+
+Microphone capture is available on macOS 15 or later. Enable it from either
+**Settings → Capture → Capture microphone** or the menubar's **Microphone**
+section.
+
+The microphone picker lists `System Default` plus detected input devices such
+as the built-in MacBook mic, USB microphones, AirPods, and iPhone microphones.
+The selected input is remembered. If that device is later disconnected,
+ndi-bar keeps the selection visible as unavailable so you can switch back to
+`System Default` or choose another input.
+
+Microphone selection is applied when a display stream starts. If you change the
+microphone while a display is already streaming, stop and restart that display
+stream to use the new input.
 
 ## Receiving the stream
 
@@ -160,10 +184,11 @@ Screen Recording grant to that hash. Without intervention, the
 System Settings toggle stays *on* while `CGPreflightScreenCaptureAccess()`
 quietly returns *false*, and the menubar icon becomes a warning triangle.
 
-`make install` handles this automatically: it runs
-`tccutil reset ScreenCapture` right before launching the new build so
-macOS treats it as a first-time request. Click the menubar icon →
-**Grant Screen Recording** → Allow → relaunch.
+`make install` handles this automatically: it runs TCC resets right before
+launching the new build so macOS treats it as a first-time request. Click the
+menubar icon → **Grant Screen Recording** → Allow → relaunch. If microphone
+capture is enabled, macOS will also ask for Microphone access the first time
+you start a stream.
 
 If things ever get stuck (stale grants from an older path, etc.), reset
 manually:
@@ -188,8 +213,9 @@ SCShareableContent ─► [SCDisplay] ─► [DisplayInfo]
                                 │           │
                         SCStream (BGRA, 60) │
                                 │           ▼
-              SCStreamOutput .screen  ─► NDISender.sendVideo
-              SCStreamOutput .audio   ─► NDISender.sendAudio
+              SCStreamOutput .screen      ─► NDISender.sendVideo
+              SCStreamOutput .audio       ┐
+              SCStreamOutput .microphone  ┴─► NDISender.sendAudio
                                            │
                                  dlopen'd libndi.dylib
                                            │
