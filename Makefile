@@ -202,7 +202,7 @@ sign: gen
 		echo 'error: TEAM_ID must be a 10-character Apple Developer Team ID' >&2; \
 		exit 1; \
 	fi; \
-	for TOOL in xcodebuild security codesign xcrun lipo; do \
+	for TOOL in xcodebuild security codesign xcrun lipo mktemp; do \
 		command -v "$$TOOL" >/dev/null 2>&1 || { echo "error: required tool missing: $$TOOL" >&2; exit 1; }; \
 	done; \
 	IDENTITIES=$$(security find-identity -v -p codesigning | awk -v team="$(TEAM_ID)" -v kind="$(SIGN_IDENTITY)" 'index($$0, "\"" kind ":") && index($$0, "(" team ")\"") { print $$2 }'); \
@@ -229,14 +229,24 @@ sign: gen
 	fi; \
 	APP="$(SIGNED_APP)"; \
 	test -d "$$APP" || { echo "error: signed app not found at $$APP" >&2; exit 1; }; \
+	ENTITLEMENTS_PLIST=$$(mktemp "$${TMPDIR:-/tmp}/ndi-bar-entitlements.XXXXXX"); \
+	trap 'rm -f "$$ENTITLEMENTS_PLIST"' EXIT; \
+	codesign -d --entitlements :- "$$APP" > "$$ENTITLEMENTS_PLIST" 2>/dev/null; \
+	/usr/bin/plutil -lint "$$ENTITLEMENTS_PLIST" >/dev/null; \
+	GET_TASK_ALLOW=$$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$$ENTITLEMENTS_PLIST" 2>/dev/null || true); \
+	[[ "$$GET_TASK_ALLOW" != 'true' ]] || { echo 'error: distribution app contains com.apple.security.get-task-allow=true' >&2; exit 1; }; \
+	DISABLE_LIBRARY_VALIDATION=$$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.disable-library-validation' "$$ENTITLEMENTS_PLIST" 2>/dev/null || true); \
+	[[ "$$DISABLE_LIBRARY_VALIDATION" == 'true' ]] || { echo 'error: distribution app must contain com.apple.security.cs.disable-library-validation=true for dynamic libndi' >&2; exit 1; }; \
 	ACTUAL_VERSION=$$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$$APP/Contents/Info.plist"); \
 	ACTUAL_BUILD=$$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$$APP/Contents/Info.plist"); \
 	[[ "$$ACTUAL_VERSION" == "$(VERSION)" ]] || { echo "error: app version $$ACTUAL_VERSION != $(VERSION)" >&2; exit 1; }; \
 	[[ "$$ACTUAL_BUILD" == "$(BUILD_NUMBER)" ]] || { echo "error: app build $$ACTUAL_BUILD != $(BUILD_NUMBER)" >&2; exit 1; }; \
 	ARCHS=$$(lipo -archs "$$APP/Contents/MacOS/$(SCHEME)"); \
 	[[ " $$ARCHS " == *' arm64 '* && " $$ARCHS " == *' x86_64 '* ]] || { echo "error: expected universal arm64+x86_64 app; found: $$ARCHS" >&2; exit 1; }; \
-	ACTUAL_TEAM=$$(codesign -d --verbose=4 "$$APP" 2>&1 | awk -F= '/^TeamIdentifier=/ { print $$2; exit }'); \
+	SIGNING_DETAILS=$$(codesign -d --verbose=4 "$$APP" 2>&1); \
+	ACTUAL_TEAM=$$(printf '%s\n' "$$SIGNING_DETAILS" | awk -F= '/^TeamIdentifier=/ { print $$2; exit }'); \
 	[[ "$$ACTUAL_TEAM" == "$(TEAM_ID)" ]] || { echo "error: signed TeamIdentifier $$ACTUAL_TEAM != $(TEAM_ID)" >&2; exit 1; }; \
+	printf '%s\n' "$$SIGNING_DETAILS" | grep -Eq '^CodeDirectory .*flags=.*\([^)]*runtime[^)]*\)' || { echo 'error: distribution app is not signed with hardened runtime' >&2; exit 1; }; \
 	codesign --verify --deep --strict --verbose=2 "$$APP"; \
 	if /usr/bin/find "$$APP" -type f -iname '*libndi*.dylib' -print -quit | /usr/bin/grep -q .; then \
 		echo 'error: libndi must not be bundled in the app' >&2; \
