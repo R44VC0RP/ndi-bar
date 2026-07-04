@@ -11,12 +11,10 @@ struct DisplayInfo: Identifiable, Hashable {
     let scDisplay: SCDisplay
     /// Human-readable name: "Built-in Retina Display", "DELL U2723QE", etc.
     let localizedName: String
-    /// Logical resolution, in points. This matches what the user sees in
-    /// System Settings → Displays → "Use as …" and is what we configure
-    /// the SCStream output with: `SCStreamConfiguration.width/height` takes
-    /// pixels, but giving it the logical point count means macOS does the
-    /// HiDPI downsample for us and we ship a reasonable-size NDI frame
-    /// instead of the 2× framebuffer.
+    /// ScreenCaptureKit's legacy SCDisplay dimensions. These remain the
+    /// advertised source-name dimensions for compatibility with existing
+    /// ndi-bar receivers. Capture sizing instead uses SCContentFilter's
+    /// contentRect × pointPixelScale in DisplayStreamer.
     let width: Int
     let height: Int
     /// Index in the display list (1-based) — stable for menubar labeling.

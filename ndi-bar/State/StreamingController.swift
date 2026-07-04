@@ -8,36 +8,6 @@ import AVFoundation
 import Combine
 import ScreenCaptureKit
 
-/// Max height the NDI output frame is scaled down to. Aspect ratio is
-/// preserved; a display already under the cap is passed through untouched.
-enum OutputResolutionCap: String, CaseIterable, Identifiable {
-    case native
-    case p1440
-    case p1080
-    case p720
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .native: return "Native"
-        case .p1440:  return "1440p"
-        case .p1080:  return "1080p"
-        case .p720:   return "720p"
-        }
-    }
-
-    /// Maximum output height in pixels, or nil for no downscale.
-    var maxHeight: Int? {
-        switch self {
-        case .native: return nil
-        case .p1440:  return 1440
-        case .p1080:  return 1080
-        case .p720:   return 720
-        }
-    }
-}
-
 struct MicrophoneDevice: Identifiable, Equatable {
     static let systemDefaultID = "__ndi_bar_system_default_microphone__"
 
@@ -52,9 +22,6 @@ final class StreamingController: ObservableObject {
 
     private enum Keys {
         static let sourcePrefix   = "sourcePrefix"
-        static let fps            = "fps"
-        static let resolutionCap  = "resolutionCap"
-        static let legacy1080pBool = "limitTo1080p"
         static let showsCursor    = "showsCursor"
         static let captureAudio   = "captureAudio"
         static let captureMicrophone = "captureMicrophone"
@@ -62,22 +29,67 @@ final class StreamingController: ObservableObject {
     }
 
     @Published var sourcePrefix: String {
-        didSet { UserDefaults.standard.set(sourcePrefix, forKey: Keys.sourcePrefix) }
+        didSet {
+            UserDefaults.standard.set(sourcePrefix, forKey: Keys.sourcePrefix)
+            scheduleActiveStreamRestart()
+        }
     }
     @Published var fps: Int {
-        didSet { UserDefaults.standard.set(fps, forKey: Keys.fps) }
+        didSet {
+            let normalized = CapturePreferences.normalizedFPS(fps)
+            if fps != normalized {
+                fps = normalized
+                return
+            }
+            persistCapturePreferences()
+            scheduleActiveStreamRestart()
+        }
     }
     @Published var resolutionCap: OutputResolutionCap {
-        didSet { UserDefaults.standard.set(resolutionCap.rawValue, forKey: Keys.resolutionCap) }
+        didSet {
+            persistCapturePreferences()
+            scheduleActiveStreamRestart()
+        }
+    }
+    @Published var customResolutionWidth: Int {
+        didSet {
+            let normalized = CapturePreferences.normalizedDimension(customResolutionWidth)
+            if customResolutionWidth != normalized {
+                customResolutionWidth = normalized
+                return
+            }
+            persistCapturePreferences()
+            if resolutionCap == .custom { scheduleActiveStreamRestart() }
+        }
+    }
+    @Published var customResolutionHeight: Int {
+        didSet {
+            let normalized = CapturePreferences.normalizedDimension(customResolutionHeight)
+            if customResolutionHeight != normalized {
+                customResolutionHeight = normalized
+                return
+            }
+            persistCapturePreferences()
+            if resolutionCap == .custom { scheduleActiveStreamRestart() }
+        }
     }
     @Published var showsCursor: Bool {
-        didSet { UserDefaults.standard.set(showsCursor, forKey: Keys.showsCursor) }
+        didSet {
+            UserDefaults.standard.set(showsCursor, forKey: Keys.showsCursor)
+            scheduleActiveStreamRestart()
+        }
     }
     @Published var captureAudio: Bool {
-        didSet { UserDefaults.standard.set(captureAudio, forKey: Keys.captureAudio) }
+        didSet {
+            UserDefaults.standard.set(captureAudio, forKey: Keys.captureAudio)
+            scheduleActiveStreamRestart()
+        }
     }
     @Published var captureMicrophone: Bool {
-        didSet { UserDefaults.standard.set(captureMicrophone, forKey: Keys.captureMicrophone) }
+        didSet {
+            UserDefaults.standard.set(captureMicrophone, forKey: Keys.captureMicrophone)
+            scheduleActiveStreamRestart()
+        }
     }
     @Published var selectedMicrophoneDeviceID: String {
         didSet {
@@ -86,6 +98,7 @@ final class StreamingController: ObservableObject {
             } else {
                 UserDefaults.standard.set(selectedMicrophoneDeviceID, forKey: Keys.selectedMicrophoneDeviceID)
             }
+            scheduleActiveStreamRestart()
         }
     }
 
@@ -113,33 +126,44 @@ final class StreamingController: ObservableObject {
             !microphoneDevices.contains { $0.id == selectedMicrophoneDeviceID }
     }
 
+    var captureConfigurationSummary: String {
+        let resolution: String
+        if resolutionCap == .custom {
+            resolution = "fit within \(customResolutionWidth)×\(customResolutionHeight)"
+        } else if let maximum = resolutionCap.maximumSize(
+            customWidth: customResolutionWidth,
+            customHeight: customResolutionHeight
+        ) {
+            resolution = "fit within \(maximum)"
+        } else {
+            resolution = "native SCK pixels"
+        }
+        return "\(fps) fps, \(resolution)"
+    }
+
     // MARK: Internals
 
     private var streamers: [CGDirectDisplayID: DisplayStreamer] = [:]
-    private var refreshTask: Task<Void, Never>?
+    private var desiredActiveDisplayIDs: Set<CGDirectDisplayID> = []
+    private var pendingRestartDisplayIDs: Set<CGDirectDisplayID> = []
+    private var lifecycleTasks: [CGDirectDisplayID: Task<Void, Never>] = [:]
+    private var restartDebounceTask: Task<Void, Never>?
+    private var refreshErrorMessage: String?
+    private var stopAllDepth = 0
+    private var isShuttingDown = false
+
+    private var acceptsNewStreams: Bool {
+        stopAllDepth == 0 && !isShuttingDown
+    }
 
     init() {
         let d = UserDefaults.standard
+        let capturePreferences = CapturePreferences(defaults: d)
         self.sourcePrefix = (d.string(forKey: Keys.sourcePrefix)?.nilIfEmpty) ?? Host.defaultSourcePrefix()
-        self.fps = {
-            let raw = d.integer(forKey: Keys.fps)
-            return raw == 0 ? 60 : raw
-        }()
-
-        // Preference migration: v0.1 stored a single bool, v0.2 stores an enum.
-        // If the old key exists, translate it once and remove it so we never
-        // fall back to the legacy path again.
-        if let raw = d.string(forKey: Keys.resolutionCap),
-           let cap = OutputResolutionCap(rawValue: raw) {
-            self.resolutionCap = cap
-        } else if let legacy = d.object(forKey: Keys.legacy1080pBool) as? Bool {
-            let migrated: OutputResolutionCap = legacy ? .p1080 : .native
-            self.resolutionCap = migrated
-            d.set(migrated.rawValue, forKey: Keys.resolutionCap)
-            d.removeObject(forKey: Keys.legacy1080pBool)
-        } else {
-            self.resolutionCap = .p1080
-        }
+        self.fps = capturePreferences.fps
+        self.resolutionCap = capturePreferences.resolutionCap
+        self.customResolutionWidth = capturePreferences.customWidth
+        self.customResolutionHeight = capturePreferences.customHeight
 
         self.showsCursor  = d.object(forKey: Keys.showsCursor)  as? Bool ?? true
         self.captureAudio = d.object(forKey: Keys.captureAudio) as? Bool ?? true
@@ -159,14 +183,18 @@ final class StreamingController: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] note in
-            Task { @MainActor in
+            let id = note.userInfo?["displayID"] as? CGDirectDisplayID
+            let failedStreamer = note.object as? DisplayStreamer
+            let errorDescription = (note.userInfo?["error"] as? Error)?.localizedDescription
+            MainActor.assumeIsolated {
                 guard let self,
-                      let id = note.userInfo?["displayID"] as? CGDirectDisplayID else { return }
+                      let id,
+                      let failedStreamer,
+                      self.streamers[id] === failedStreamer else { return }
+                self.desiredActiveDisplayIDs.remove(id)
                 self.activeDisplayIDs.remove(id)
-                self.streamers[id] = nil
-                if let err = note.userInfo?["error"] as? Error {
-                    self.lastError = err.localizedDescription
-                }
+                if let errorDescription { self.lastError = errorDescription }
+                self.ensureLifecycleTask(for: failedStreamer.display)
             }
         }
     }
@@ -177,6 +205,7 @@ final class StreamingController: ObservableObject {
         do {
             try NDILibrary.shared.load()
             ndiReady = true
+            lastError = nil
         } catch {
             ndiReady = false
             lastError = error.localizedDescription
@@ -229,17 +258,23 @@ final class StreamingController: ObservableObject {
         do {
             let list = try await DisplayEnumerator.currentDisplays()
             self.displays = list
+            if self.lastError == refreshErrorMessage { self.lastError = nil }
+            refreshErrorMessage = nil
 
             // Drop any streamers whose display vanished.
             let knownIDs = Set(list.map(\.id))
-            for (id, s) in streamers where !knownIDs.contains(id) {
-                await s.stop()
-                streamers[id] = nil
-                activeDisplayIDs.remove(id)
+            let vanished = streamers.values.filter { !knownIDs.contains($0.display.id) }
+            for streamer in vanished {
+                desiredActiveDisplayIDs.remove(streamer.display.id)
+                ensureLifecycleTask(for: streamer.display)
+            }
+            for streamer in vanished {
+                await lifecycleTasks[streamer.display.id]?.value
             }
         } catch {
             NSLog("[ndi-bar] refresh failed: \(error)")
-            self.lastError = error.localizedDescription
+            refreshErrorMessage = error.localizedDescription
+            self.lastError = refreshErrorMessage
         }
     }
 
@@ -257,59 +292,177 @@ final class StreamingController: ObservableObject {
     }
 
     func toggle(_ display: DisplayInfo) {
-        if isStreaming(display) {
-            Task { await stop(display) }
+        if desiredActiveDisplayIDs.contains(display.id) {
+            desiredActiveDisplayIDs.remove(display.id)
         } else {
-            Task { await start(display) }
+            guard acceptsNewStreams else { return }
+            desiredActiveDisplayIDs.insert(display.id)
         }
+        ensureLifecycleTask(for: display)
     }
 
     func start(_ display: DisplayInfo) async {
+        guard acceptsNewStreams else { return }
         guard ndiReady else {
             lastError = "NDI runtime not loaded — install the NDI SDK from https://ndi.video/sdk."
             return
         }
-        if streamers[display.id] != nil { return }
-        guard await ensureMicrophoneReadyIfNeeded() else { return }
-
-        let sourceName = ndiName(for: display)
-        let quality = StreamQuality(
-            targetWidth:  nil,
-            targetHeight: resolutionCap.maxHeight,
-            fps: fps,
-            capturesAudio: captureAudio,
-            capturesMicrophone: captureMicrophone,
-            microphoneDeviceID: activeMicrophoneCaptureDeviceID,
-            showsCursor: showsCursor
-        )
-        let streamer = DisplayStreamer(
-            display: display,
-            ndiSourceName: sourceName,
-            quality: quality
-        )
-        do {
-            try await streamer.start()
-            streamers[display.id] = streamer
-            activeDisplayIDs.insert(display.id)
-        } catch {
-            NSLog("[ndi-bar] start failed: \(error)")
-            lastError = error.localizedDescription
-        }
+        desiredActiveDisplayIDs.insert(display.id)
+        ensureLifecycleTask(for: display)
+        await lifecycleTasks[display.id]?.value
     }
 
     func stop(_ display: DisplayInfo) async {
-        guard let streamer = streamers[display.id] else { return }
-        await streamer.stop()
-        streamers[display.id] = nil
-        activeDisplayIDs.remove(display.id)
+        desiredActiveDisplayIDs.remove(display.id)
+        ensureLifecycleTask(for: display)
+        await lifecycleTasks[display.id]?.value
     }
 
     func stopAll() async {
-        for (id, streamer) in streamers {
-            await streamer.stop()
-            streamers[id] = nil
+        stopAllDepth += 1
+        defer { stopAllDepth -= 1 }
+
+        restartDebounceTask?.cancel()
+        restartDebounceTask = nil
+        desiredActiveDisplayIDs.removeAll()
+        pendingRestartDisplayIDs.removeAll()
+
+        let affectedDisplays = Dictionary(
+            uniqueKeysWithValues: streamers.values.map { ($0.display.id, $0.display) }
+        )
+        for display in affectedDisplays.values {
+            ensureLifecycleTask(for: display)
         }
-        activeDisplayIDs.removeAll()
+
+        while let task = lifecycleTasks.values.first {
+            await task.value
+        }
+        // At this point no lifecycle task is transitional, so streamer
+        // ownership is the authoritative final running-state snapshot.
+        activeDisplayIDs = Set(streamers.keys)
+    }
+
+    /// Final shutdown barrier. Once this returns every SCStream has stopped
+    /// and every NDI sender has been destroyed, so unloading libndi is safe.
+    func shutdown() async {
+        isShuttingDown = true
+        await stopAll()
+    }
+
+    private func ensureLifecycleTask(for display: DisplayInfo) {
+        guard lifecycleTasks[display.id] == nil else { return }
+        lifecycleTasks[display.id] = Task { @MainActor [weak self] in
+            await self?.reconcileLifecycle(for: display)
+            self?.lifecycleTasks[display.id] = nil
+        }
+    }
+
+    private func reconcileLifecycle(for display: DisplayInfo) async {
+        while true {
+            if !desiredActiveDisplayIDs.contains(display.id) {
+                pendingRestartDisplayIDs.remove(display.id)
+                guard let streamer = streamers[display.id] else { return }
+                activeDisplayIDs.remove(display.id)
+                await streamer.stop()
+                if streamers[display.id] === streamer { streamers[display.id] = nil }
+                continue
+            }
+
+            if let streamer = streamers[display.id] {
+                guard pendingRestartDisplayIDs.remove(display.id) != nil else { return }
+                activeDisplayIDs.remove(display.id)
+                await streamer.stop()
+                if streamers[display.id] === streamer { streamers[display.id] = nil }
+                continue
+            }
+
+            // No active instance means the next start already receives the
+            // latest settings; no second restart is needed.
+            pendingRestartDisplayIDs.remove(display.id)
+            guard ndiReady else {
+                desiredActiveDisplayIDs.remove(display.id)
+                lastError = "NDI runtime not loaded — install the NDI SDK from https://ndi.video/sdk."
+                return
+            }
+            guard await ensureMicrophoneReadyIfNeeded() else {
+                desiredActiveDisplayIDs.remove(display.id)
+                return
+            }
+            // Main-actor awaits are reentrant. Stop All or a user toggle may
+            // have withdrawn this request while permission UI was pending.
+            guard acceptsNewStreams,
+                  desiredActiveDisplayIDs.contains(display.id) else { return }
+
+            let streamer = DisplayStreamer(
+                display: display,
+                ndiSourceName: ndiName(for: display),
+                quality: currentStreamQuality
+            )
+            streamers[display.id] = streamer
+            do {
+                try await streamer.start()
+                guard streamers[display.id] === streamer else { continue }
+                if acceptsNewStreams,
+                   desiredActiveDisplayIDs.contains(display.id) {
+                    activeDisplayIDs.insert(display.id)
+                    lastError = nil
+                }
+            } catch {
+                NSLog("[ndi-bar] start failed: \(error)")
+                if streamers[display.id] === streamer { streamers[display.id] = nil }
+                desiredActiveDisplayIDs.remove(display.id)
+                activeDisplayIDs.remove(display.id)
+                lastError = error.localizedDescription
+                return
+            }
+        }
+    }
+
+    private var currentStreamQuality: StreamQuality {
+        StreamQuality(
+            resolutionCap: resolutionCap,
+            customWidth: customResolutionWidth,
+            customHeight: customResolutionHeight,
+            fps: fps,
+            capturesAudio: captureAudio,
+            capturesMicrophone: captureMicrophone,
+            microphoneDeviceID: captureMicrophone ? activeMicrophoneCaptureDeviceID : nil,
+            showsCursor: showsCursor
+        )
+    }
+
+    private func scheduleActiveStreamRestart() {
+        guard !desiredActiveDisplayIDs.isEmpty else { return }
+        restartDebounceTask?.cancel()
+        restartDebounceTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+            } catch {
+                return
+            }
+            guard let self else { return }
+            for displayID in self.desiredActiveDisplayIDs {
+                if let display = self.displays.first(where: { $0.id == displayID })
+                    ?? self.streamers[displayID]?.display {
+                    if let streamer = self.streamers[displayID],
+                       streamer.quality != self.currentStreamQuality
+                        || streamer.ndiSourceName != self.ndiName(for: display) {
+                        self.pendingRestartDisplayIDs.insert(displayID)
+                    }
+                    self.ensureLifecycleTask(for: display)
+                }
+            }
+            self.restartDebounceTask = nil
+        }
+    }
+
+    private func persistCapturePreferences() {
+        CapturePreferences(
+            fps: fps,
+            resolutionCap: resolutionCap,
+            customWidth: customResolutionWidth,
+            customHeight: customResolutionHeight
+        ).persist(to: .standard)
     }
 
     // MARK: Permissions

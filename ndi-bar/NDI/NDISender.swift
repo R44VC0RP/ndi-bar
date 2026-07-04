@@ -8,12 +8,22 @@ import Foundation
 import CoreVideo
 import CoreMedia
 
-final class NDISender {
+final class NDISender: @unchecked Sendable {
+    /// Sender creation/destruction is serialized here, never on the main
+    /// thread. Frame and audio sends remain inline on SCK delivery queues.
+    private static let lifecycleQueue = DispatchQueue(
+        label: "com.ryanvogel.ndi-bar.ndi-sender-lifecycle",
+        qos: .userInitiated
+    )
+
     let name: String
     private let handle: OpaquePointer
     private let lib: NDILibrary
+    private let destructionState = DestructionState()
 
-    init?(name: String, lib: NDILibrary = .shared) {
+    private init?(name: String, lib: NDILibrary) {
+        dispatchPrecondition(condition: .onQueue(Self.lifecycleQueue))
+        precondition(!Thread.isMainThread)
         guard lib.isLoaded else {
             NSLog("[ndi-bar] NDISender: library not loaded")
             return nil
@@ -27,8 +37,38 @@ final class NDISender {
         self.lib = lib
     }
 
+    static func create(name: String, lib: NDILibrary = .shared) async -> NDISender? {
+        await withCheckedContinuation { continuation in
+            lifecycleQueue.async {
+                continuation.resume(returning: NDISender(name: name, lib: lib))
+            }
+        }
+    }
+
+    /// Must be awaited by normal lifecycle teardown. DisplayStreamer first
+    /// stops SCK and drains both callback queues, establishing that no send can
+    /// overlap this off-main destruction or a subsequent global NDI unload.
+    func destroy() async {
+        guard destructionState.beginDestroy() else { return }
+        let resources = SenderResources(handle: handle, lib: lib)
+        await withCheckedContinuation { continuation in
+            Self.lifecycleQueue.async {
+                precondition(!Thread.isMainThread)
+                resources.destroy()
+                continuation.resume()
+            }
+        }
+    }
+
     deinit {
-        lib.destroySender(handle)
+        guard destructionState.beginDestroy() else { return }
+        let resources = SenderResources(handle: handle, lib: lib)
+        // Defensive RAII fallback. Graceful lifecycle paths always await
+        // destroy(); this path still guarantees NDI destruction is off-main.
+        Self.lifecycleQueue.async {
+            precondition(!Thread.isMainThread)
+            resources.destroy()
+        }
     }
 
     /// Returns how many NDI receivers are currently subscribed.
@@ -40,12 +80,12 @@ final class NDISender {
 
     /// Ships a BGRA `CVPixelBuffer` as an NDI video frame.
     /// The pixel buffer is locked for the duration of the call so this uses
-    /// the synchronous send; that's simpler and fine at 60 fps on 10 GbE.
-    /// We can move to `send_video_async_v2` with a double-buffered retain
-    /// strategy once this is validated end-to-end.
+    /// the synchronous send. This guarantees the buffer stays valid for the
+    /// complete NDI call without retaining extra frame-sized buffers.
+    @discardableResult
     func sendVideo(pixelBuffer: CVPixelBuffer,
                    frameRateN: Int32 = 60000,
-                   frameRateD: Int32 = 1000) {
+                   frameRateD: Int32 = 1000) -> Bool {
         let w = Int32(CVPixelBufferGetWidth(pixelBuffer))
         let h = Int32(CVPixelBufferGetHeight(pixelBuffer))
         let stride = Int32(CVPixelBufferGetBytesPerRow(pixelBuffer))
@@ -53,7 +93,7 @@ final class NDISender {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
-        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return false }
 
         var frame = NDIlib_video_frame_v2_t(
             width: w,
@@ -66,6 +106,7 @@ final class NDISender {
         )
 
         lib.sendVideo(handle, frame: &frame)
+        return true
     }
 
     // MARK: - Audio
@@ -98,6 +139,28 @@ final class NDISender {
             )
 
             lib.sendAudio(handle, frame: &frame)
+        }
+    }
+}
+
+private struct SenderResources: @unchecked Sendable {
+    let handle: OpaquePointer
+    let lib: NDILibrary
+
+    func destroy() {
+        lib.destroySender(handle)
+    }
+}
+
+private final class DestructionState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasBegun = false
+
+    func beginDestroy() -> Bool {
+        lock.withLock {
+            guard !hasBegun else { return false }
+            hasBegun = true
+            return true
         }
     }
 }

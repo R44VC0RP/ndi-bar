@@ -22,19 +22,55 @@ struct SettingsView: View {
             }
 
             Section("Capture") {
-                Picker("Frame rate", selection: $controller.fps) {
-                    Text("30 fps").tag(30)
-                    Text("60 fps").tag(60)
+                HStack {
+                    Text("Frame rate")
+                    Spacer()
+                    TextField("FPS", value: $controller.fps, format: .number)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 52)
+                        .accessibilityLabel("Frame rate in frames per second")
+                        .accessibilityHint("Enter a whole number from 1 through 120. Values outside that range are clamped.")
+                    Stepper("Frame rate", value: $controller.fps, in: CapturePreferences.validFPS)
+                        .labelsHidden()
+                        .accessibilityHint("Adjusts frame rate from 1 through 120 frames per second.")
                 }
-                .pickerStyle(.segmented)
+                .help("Any whole-number FPS from 1 through 120. Actual delivery can be limited by display and capture cadence.")
 
                 Picker("Output resolution", selection: $controller.resolutionCap) {
                     ForEach(OutputResolutionCap.allCases) { cap in
                         Text(cap.displayName).tag(cap)
                     }
                 }
-                .pickerStyle(.segmented)
-                .help("Max output height. Aspect ratio is preserved; a display already under the cap is passed through at its native size.")
+                .pickerStyle(.menu)
+                .help("Presets and custom dimensions are maximum bounds. Output preserves source aspect ratio and is never upscaled.")
+
+                if controller.resolutionCap == .custom {
+                    HStack {
+                        Text("Custom maximum")
+                        Spacer()
+                        TextField("Width", value: $controller.customResolutionWidth, format: .number)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 72)
+                            .accessibilityLabel("Custom maximum width in pixels")
+                            .accessibilityHint("Enter a whole number from 2 through 16384. Values outside that range are clamped.")
+                        Text("×")
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                        TextField("Height", value: $controller.customResolutionHeight, format: .number)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 72)
+                            .accessibilityLabel("Custom maximum height in pixels")
+                            .accessibilityHint("Enter a whole number from 2 through 16384. Values outside that range are clamped.")
+                    }
+                    .help("Maximum width and height in pixels (2–16384). Changes settle for half a second before active streams restart.")
+                }
+
+                Text("Effective request: \(controller.captureConfigurationSummary). Active streams restart after changes settle.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("Out-of-range FPS and custom dimensions are clamped to the limits shown above.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
 
                 Toggle("Show cursor", isOn: $controller.showsCursor)
                 Toggle("Capture system audio", isOn: $controller.captureAudio)
@@ -94,7 +130,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
-        .frame(minWidth: 440, minHeight: 420)
+        .frame(minWidth: 460, minHeight: 480)
         .onAppear {
             controller.refreshMicrophones()
         }

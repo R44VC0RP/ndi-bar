@@ -3,7 +3,7 @@
 ## Purpose
 - Repository guidance for agentic coding tools working in ndi-bar.
 - Project is a macOS menu bar NDI screen sender (SwiftUI + AppKit).
-- Primary target: `ndi-bar` (no test target yet).
+- Primary target: `ndi-bar`; unit-test target: `ndi-barTests`.
 
 ## Repository Layout
 - `project.yml` — xcodegen manifest. Single source of truth for the Xcode project.
@@ -13,6 +13,7 @@
   - `State/` — `StreamingController` (the @MainActor ObservableObject).
   - `Menu/` — NSStatusItem/NSMenu controller.
   - `UI/` — SwiftUI Settings view.
+- `ndi-barTests/` — capture configuration and lifecycle unit tests.
 - `Makefile` — `make gen | open | build | release | run | clean`.
 
 ## Tooling / Environment
@@ -56,11 +57,10 @@ xcodebuild -project ndi-bar.xcodeproj -scheme ndi-bar \
   themselves — required by the NDI license and keeps the app small.
 
 ## Test Commands
-- No test target yet. When added, follow the Dictate pattern:
-  ```sh
-  xcodebuild -project ndi-bar.xcodeproj -scheme ndi-bar \
-    -destination 'platform=macOS' test
-  ```
+```sh
+xcodebuild -project ndi-bar.xcodeproj -scheme ndi-bar \
+  -destination 'platform=macOS' test
+```
 
 ## Lint / Static Checks
 - No dedicated linter configured. Treat `xcodebuild` warnings as the primary
@@ -76,8 +76,9 @@ xcodebuild -project ndi-bar.xcodeproj -scheme ndi-bar \
   - NDI runtime loading
   - display enumeration (`SCShareableContent` + `NSScreen.localizedName`)
   - start/stop lifecycle per-display
-  - persisted preferences (`UserDefaults`: sourcePrefix, fps, limitTo1080p,
-    showsCursor, captureAudio)
+  - persisted preferences (`UserDefaults`: sourcePrefix, fps, resolutionCap,
+    customResolutionWidth/Height, showsCursor, captureAudio,
+    captureMicrophone, selectedMicrophoneDeviceID; migrates limitTo1080p)
   - screen-recording permission gate
 - `DisplayStreamer` is NOT @MainActor — SCStream delivery callbacks must
   never touch the main actor on the hot path. It uses two dedicated serial
@@ -85,9 +86,9 @@ xcodebuild -project ndi-bar.xcodeproj -scheme ndi-bar \
 - `NDILibrary` is a singleton that dlopen's libndi.dylib. All NDI C entry
   points are resolved via `dlsym` and stored as `@convention(c)` function
   pointers in `NDITypes.swift`. Do not introduce a bridging header.
-- `NDISender` is RAII — destroying it calls `NDIlib_send_destroy`. One
-  sender instance per captured display; sender lifetime is tied to the
-  `DisplayStreamer` that owns it.
+- `NDISender` creation and destruction run on its dedicated off-main lifecycle
+  queue. Graceful teardown awaits explicit destruction after callback drains;
+  RAII provides a defensive off-main fallback. One sender per display.
 
 ## Code Style Guidelines
 
@@ -185,4 +186,4 @@ xcodebuild -project ndi-bar.xcodeproj -scheme ndi-bar \
 ## Commit / PR Notes (If Requested)
 - Summarize user-visible behavior changes.
 - Mention any new NDI symbols resolved or macOS APIs relied on.
-- Note whether `make build` succeeds; there are no automated tests yet.
+- Note whether the build and automated tests succeed.

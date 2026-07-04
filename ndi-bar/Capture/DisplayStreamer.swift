@@ -2,7 +2,7 @@
 // Owns one SCStream + one NDISender for a single display.
 //
 // Pipeline:
-//   SCStream (BGRA, 60 fps) ─┬─► SCStreamOutput .screen      ─► NDISender.sendVideo
+//   SCStream (BGRA) ─────────┬─► SCStreamOutput .screen      ─► NDISender.sendVideo
 //                            ├─► SCStreamOutput .audio       ┐
 //                            └─► SCStreamOutput .microphone  ┴─► NDISender.sendAudio
 //
@@ -25,10 +25,10 @@ enum StreamerError: Error, LocalizedError {
 }
 
 /// Per-display capture quality.
-struct StreamQuality: Equatable {
-    /// Target pixel dimensions. `nil` means "native display resolution".
-    var targetWidth: Int?
-    var targetHeight: Int?
+struct StreamQuality: Equatable, Sendable {
+    var resolutionCap: OutputResolutionCap
+    var customWidth: Int
+    var customHeight: Int
     /// Frames per second.
     var fps: Int
     /// Whether to capture system audio alongside video.
@@ -41,22 +41,27 @@ struct StreamQuality: Equatable {
     var showsCursor: Bool
 
     static let default1080p60 = StreamQuality(
-        targetWidth: 1920, targetHeight: 1080, fps: 60,
+        resolutionCap: .p1080, customWidth: 1920, customHeight: 1080, fps: 60,
         capturesAudio: true, capturesMicrophone: false, microphoneDeviceID: nil,
         showsCursor: true
     )
 
     static let nativeResolution60 = StreamQuality(
-        targetWidth: nil, targetHeight: nil, fps: 60,
+        resolutionCap: .native, customWidth: 1920, customHeight: 1080, fps: 60,
         capturesAudio: true, capturesMicrophone: false, microphoneDeviceID: nil,
         showsCursor: true
     )
 }
 
-final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
+// Lifecycle mutation is main-actor isolated. Callback-facing state is either
+// immutable, lock-protected, or confined to its delivery queue, and teardown
+// drains both delivery queues before releasing resources.
+final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
+    private static let streamQueueDepth = 3
+
     let display: DisplayInfo
     let ndiSourceName: String
-    private(set) var quality: StreamQuality
+    let quality: StreamQuality
 
     private let captureQueue = DispatchQueue(
         label: "com.ryanvogel.ndi-bar.capture",
@@ -68,11 +73,22 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
     )
 
     private var stream: SCStream?
+    // Main-actor lifecycle-confined. Publication happens before outputs are
+    // registered; clearing happens only after capture stops and both callback
+    // queues drain. Callbacks therefore read this without hot-path locking.
     private var sender: NDISender?
     private let audioMixer = AudioFrameMixer()
+    private var connectionTimer: DispatchSourceTimer?
+    private let connectionCountLock = NSLock()
+    private var cachedConnectionCount: Int32 = 0
+    private let lifecycleLock = NSLock()
+    private var isStopping = false
+    private var diagnostics = Diagnostics()
 
     /// Exposed so the UI can show "2 viewers" etc.
-    private(set) var connectionCount: Int32 = 0
+    var connectionCount: Int32 {
+        connectionCountLock.withLock { cachedConnectionCount }
+    }
 
     init(display: DisplayInfo, ndiSourceName: String, quality: StreamQuality = .default1080p60) {
         self.display = display
@@ -82,12 +98,17 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
 
     // MARK: Lifecycle
 
+    @MainActor
     func start() async throws {
-        guard sender == nil else { return }
+        guard stream == nil else { return }
 
-        guard let newSender = NDISender(name: ndiSourceName) else {
+        lifecycleLock.withLock { isStopping = false }
+
+        guard let newSender = await NDISender.create(name: ndiSourceName) else {
             throw StreamerError.senderCreationFailed
         }
+        // No SCK callback can run yet. Registering outputs below publishes the
+        // fully initialized sender to the delivery queues.
         sender = newSender
 
         let filter = SCContentFilter(
@@ -96,25 +117,46 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
             exceptingWindows: []
         )
 
-        let config = makeStreamConfiguration()
-        let s = SCStream(filter: filter, configuration: config, delegate: self)
+        let configuredCapture = makeStreamConfiguration(filter: filter)
+        let s = SCStream(
+            filter: filter,
+            configuration: configuredCapture.configuration,
+            delegate: self
+        )
         self.stream = s
 
-        try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
-        if quality.capturesAudio {
-            try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
-        }
-        if quality.capturesMicrophone {
-            if #available(macOS 15.0, *) {
-                try s.addStreamOutput(self, type: .microphone, sampleHandlerQueue: audioQueue)
+        do {
+            try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
+            if quality.capturesAudio {
+                try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
             }
-        }
+            if quality.capturesMicrophone {
+                if #available(macOS 15.0, *) {
+                    try s.addStreamOutput(self, type: .microphone, sampleHandlerQueue: audioQueue)
+                }
+            }
 
-        try await s.startCapture()
-        NSLog("[ndi-bar] started streaming '\(ndiSourceName)'")
+            try await s.startCapture()
+            startConnectionPolling()
+            NSLog(
+                "[ndi-bar] started '\(ndiSourceName)' config=\(effectiveConfigurationDescription(nativeSourceSize: configuredCapture.nativeSourceSize, requestedOutputSize: configuredCapture.outputSize))"
+            )
+        } catch {
+            connectionTimer?.cancel()
+            connectionTimer = nil
+            try? await s.stopCapture()
+            await drainCallbackQueues()
+            stream = nil
+            await destroyPublishedSender()
+            throw error
+        }
     }
 
+    @MainActor
     func stop() async {
+        lifecycleLock.withLock { isStopping = true }
+        connectionTimer?.cancel()
+        connectionTimer = nil
         if let s = stream {
             do {
                 try await s.stopCapture()
@@ -122,24 +164,40 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
                 NSLog("[ndi-bar] stopCapture error: \(error)")
             }
         }
+        // stopCapture prevents new samples; these barriers wait for already
+        // enqueued callbacks before destroying the sender they reference.
+        await drainCallbackQueues()
         stream = nil
-        sender = nil
         audioMixer.reset()
-        connectionCount = 0
-        NSLog("[ndi-bar] stopped streaming '\(ndiSourceName)'")
+        setCachedConnectionCount(0)
+        await destroyPublishedSender()
+        NSLog("[ndi-bar] stopped '\(ndiSourceName)' \(diagnostics.stopSummary)")
     }
 
     // MARK: Config
 
-    private func makeStreamConfiguration() -> SCStreamConfiguration {
+    private func makeStreamConfiguration(filter: SCContentFilter) -> ConfiguredCapture {
         let cfg = SCStreamConfiguration()
+        let frameRate = CaptureFrameRate(quality.fps)
 
-        // Dimensions
-        let nativeW = display.width
-        let nativeH = display.height
-        let (outW, outH) = targetSize(forNativeWidth: nativeW, nativeHeight: nativeH)
-        cfg.width  = outW
-        cfg.height = outH
+        // On macOS 14+, SCK's authoritative native pixels are the filter's
+        // point-based content rect multiplied by its point-to-pixel scale.
+        let native = CaptureGeometry.nativeResolution(
+            contentWidth: Double(filter.contentRect.width),
+            contentHeight: Double(filter.contentRect.height),
+            pointPixelScale: Double(filter.pointPixelScale),
+            fallback: PixelSize(width: display.width, height: display.height)
+        )
+        if native.usedFallback {
+            NSLog("[ndi-bar] invalid contentRect/pointPixelScale for '\(ndiSourceName)'; conservatively using SCDisplay \(native.size)")
+        }
+        let maximum = quality.resolutionCap.maximumSize(
+            customWidth: quality.customWidth,
+            customHeight: quality.customHeight
+        )
+        let output = CaptureGeometry.outputSize(source: native.size, maximum: maximum)
+        cfg.width = output.width
+        cfg.height = output.height
         cfg.scalesToFit = true
 
         // BGRA keeps the NDI path simple (SDK does BGRA→YUV internally)
@@ -148,8 +206,13 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
         cfg.showsCursor = quality.showsCursor
 
         // Framerate
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(quality.fps, 1)))
-        cfg.queueDepth = 6
+        cfg.minimumFrameInterval = CMTime(
+            value: 1,
+            timescale: frameRate.minimumFrameTimescale
+        )
+        // SCK documents 3 as both the default and minimum (maximum 8). Pin it
+        // explicitly to bound IOSurface memory and favor frame freshness.
+        cfg.queueDepth = Self.streamQueueDepth
 
         // Audio
         if quality.capturesAudio || quality.capturesMicrophone {
@@ -167,20 +230,11 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
             }
         }
 
-        return cfg
-    }
-
-    /// Computes output dimensions that keep aspect ratio but cap to the
-    /// quality target height if set. Never upscales.
-    private func targetSize(forNativeWidth w: Int, nativeHeight h: Int) -> (Int, Int) {
-        guard let targetH = quality.targetHeight, targetH > 0, targetH < h else {
-            return (w, h)
-        }
-        let ratio = Double(w) / Double(max(h, 1))
-        let outH = targetH
-        let outW = Int((Double(outH) * ratio).rounded())
-        // Keep width even (some receivers prefer it for YUV).
-        return (outW - (outW % 2), outH - (outH % 2))
+        return ConfiguredCapture(
+            configuration: cfg,
+            nativeSourceSize: native.size,
+            outputSize: output
+        )
     }
 
     // MARK: SCStreamOutput
@@ -188,26 +242,43 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
     func stream(_ stream: SCStream,
                 didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of type: SCStreamOutputType) {
-        guard sampleBuffer.isValid else { return }
+        if type == .screen { diagnostics.frameCallbacks += 1 }
+        guard sampleBuffer.isValid else {
+            if type == .screen { diagnostics.invalidBuffers += 1 }
+            return
+        }
         guard let sender = self.sender else { return }
 
         switch type {
         case .screen:
+            let frameRate = CaptureFrameRate(quality.fps)
             guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
                   let info = attachments.first,
                   let statusRaw = info[.status] as? Int,
                   let status = SCFrameStatus(rawValue: statusRaw),
                   status == .complete else {
+                diagnostics.nonCompleteFrames += 1
                 return
             }
-            guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
-            sender.sendVideo(
+            guard let pixelBuffer = sampleBuffer.imageBuffer else {
+                diagnostics.missingImages += 1
+                return
+            }
+            if diagnostics.firstDeliveredSize == nil {
+                let delivered = PixelSize(
+                    width: CVPixelBufferGetWidth(pixelBuffer),
+                    height: CVPixelBufferGetHeight(pixelBuffer)
+                )
+                diagnostics.firstDeliveredSize = delivered
+                NSLog("[ndi-bar] first video '\(ndiSourceName)' delivered=\(delivered)")
+            }
+            if sender.sendVideo(
                 pixelBuffer: pixelBuffer,
-                frameRateN: Int32(quality.fps) * 1000,
-                frameRateD: 1000
-            )
-            // Cheap update of connection count (polls NDI, not the display).
-            connectionCount = sender.connectionCount
+                frameRateN: frameRate.ndiNumerator,
+                frameRateD: frameRate.ndiDenominator
+            ) {
+                diagnostics.videoSubmissions += 1
+            }
 
         case .audio:
             if capturesBothAudioInputs {
@@ -231,11 +302,13 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
     // MARK: SCStreamDelegate
 
     func stream(_ stream: SCStream, didStopWithError error: any Error) {
+        let stopping = lifecycleLock.withLock { isStopping }
+        guard !stopping else { return }
         NSLog("[ndi-bar] stream stopped with error: \(error)")
         // Surface via notification so the controller can flip UI state.
         NotificationCenter.default.post(
             name: .displayStreamFailed,
-            object: nil,
+            object: self,
             userInfo: [
                 "displayID": display.id,
                 "error": error
@@ -250,6 +323,72 @@ final class DisplayStreamer: NSObject, SCStreamDelegate, SCStreamOutput {
     static var supportsMicrophoneCapture: Bool {
         if #available(macOS 15.0, *) { return true }
         return false
+    }
+
+    private func effectiveConfigurationDescription(
+        nativeSourceSize: PixelSize,
+        requestedOutputSize: PixelSize
+    ) -> String {
+        let cap = quality.resolutionCap == .custom
+            ? "custom \(quality.customWidth)×\(quality.customHeight) max"
+            : quality.resolutionCap.displayName
+        return "fps=\(quality.fps) resolution=\(cap) source=\(nativeSourceSize) requested=\(requestedOutputSize) cursor=\(quality.showsCursor) systemAudio=\(quality.capturesAudio) microphone=\(quality.capturesMicrophone) queueDepth=\(Self.streamQueueDepth)"
+    }
+
+    private func startConnectionPolling() {
+        let timer = DispatchSource.makeTimerSource(queue: captureQueue)
+        timer.schedule(deadline: .now(), repeating: .seconds(1), leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            guard let self, let sender = self.sender else { return }
+            self.setCachedConnectionCount(sender.connectionCount)
+        }
+        connectionTimer = timer
+        timer.resume()
+    }
+
+    private func setCachedConnectionCount(_ count: Int32) {
+        connectionCountLock.withLock { cachedConnectionCount = count }
+    }
+
+    @MainActor
+    private func drainCallbackQueues() async {
+        await drain(captureQueue)
+        await drain(audioQueue)
+    }
+
+    @MainActor
+    private func destroyPublishedSender() async {
+        guard let sender else { return }
+        // Both callback queues have already drained, so clearing cannot race a
+        // read and this strong local keeps the sender alive until destruction.
+        self.sender = nil
+        await sender.destroy()
+    }
+
+    @MainActor
+    private func drain(_ queue: DispatchQueue) async {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume() }
+        }
+    }
+}
+
+private struct ConfiguredCapture {
+    let configuration: SCStreamConfiguration
+    let nativeSourceSize: PixelSize
+    let outputSize: PixelSize
+}
+
+private struct Diagnostics {
+    var frameCallbacks: UInt64 = 0
+    var invalidBuffers: UInt64 = 0
+    var nonCompleteFrames: UInt64 = 0
+    var missingImages: UInt64 = 0
+    var videoSubmissions: UInt64 = 0
+    var firstDeliveredSize: PixelSize?
+
+    var stopSummary: String {
+        "frames=\(frameCallbacks) submitted=\(videoSubmissions) statusDrops=\(nonCompleteFrames) invalid=\(invalidBuffers) missingImage=\(missingImages) firstDelivered=\(firstDeliveredSize?.description ?? "none")"
     }
 }
 

@@ -29,10 +29,16 @@ One menubar icon. One click to start streaming Monitor 1, 2, 3, or 4.
 
 ## Status
 
-v0.1.0 scaffold. Compiles, runs, and should light up an NDI source per
-selected display. Audio capture uses ScreenCaptureKit's built-in system-audio
-tap (no virtual audio device required), with optional selectable microphone
-capture on macOS 15 or later.
+v0.2.0 (build 2) release candidate. It adds bounded custom capture resolution
+and frame-rate controls, automatic active-stream reconfiguration, safer
+capture/sender teardown, lifecycle tests, and a reproducible signed-release
+workflow. Audio capture uses ScreenCaptureKit's built-in system-audio tap (no
+virtual audio device required), with optional selectable microphone capture on
+macOS 15 or later.
+
+Automated builds and unit tests cover configuration and lifecycle logic, but
+this release has not yet been validated end-to-end with a live NDI receiver or
+OBS/DistroAV. No performance or latency benchmarks are claimed.
 
 ## Requirements
 
@@ -66,9 +72,23 @@ The selected input is remembered. If that device is later disconnected,
 ndi-bar keeps the selection visible as unavailable so you can switch back to
 `System Default` or choose another input.
 
-Microphone selection is applied when a display stream starts. If you change the
-microphone while a display is already streaming, stop and restart that display
-stream to use the new input.
+Microphone and other capture-setting changes automatically restart active
+display streams after a short debounce.
+
+## Frame rate and resolution
+
+Settings accepts any whole-number frame rate from **1 through 120 fps**. This
+sets both ScreenCaptureKit's requested minimum frame interval and the NDI frame
+rate metadata. Actual frame delivery can still be limited by the display's
+refresh rate and ScreenCaptureKit's capture cadence.
+
+Resolution can be **Native**, a preset, or a custom maximum width × height.
+Presets and custom values are bounding boxes, not forced canvases: ndi-bar fits
+the ScreenCaptureKit source pixels within both limits, preserves aspect ratio,
+never intentionally upscales, and emits positive even NDI dimensions. Native
+uses ScreenCaptureKit's macOS 14+ `contentRect × pointPixelScale` semantics.
+Active streams briefly restart after capture changes settle so the effective
+configuration remains consistent.
 
 ## Receiving the stream
 
@@ -87,17 +107,17 @@ Fastest way to confirm the stream is live before touching OBS:
 If you can see live video here, the sender half is working and any issues
 from here on are on the receiver side.
 
-### Receiving in OBS Studio (macOS)
+### Receiving in OBS Studio with DistroAV
 
-OBS doesn't include NDI support out of the box — install the `obs-ndi`
-plugin first. It bundles its own NDI runtime, so even on a Mac that
-doesn't have the NDI SDK installed, OBS can still receive.
+OBS doesn't include NDI support out of the box. Install both the current
+**DistroAV** plugin (formerly obs-ndi) and the separately distributed **NDI
+Runtime** required by the plugin on the receiver machine.
 
 1. **Install OBS** — `brew install --cask obs`, or grab the installer from
    <https://obsproject.com/download>.
-2. **Install the NDI plugin** — download the latest macOS `.pkg` from
-   <https://github.com/obs-ndi/obs-ndi/releases> and run it. Quit and
-   relaunch OBS afterwards.
+2. **Install DistroAV and its required NDI Runtime** — use the current release
+   and installation notes at <https://github.com/DistroAV/DistroAV/releases>.
+   Quit and relaunch OBS afterwards.
 3. **Add an NDI source:**
    - In the OBS **Sources** panel, click **+** → **NDI™ Source**.
    - Name it whatever you want ("Monitor 1", etc.) → **OK**.
@@ -105,8 +125,9 @@ doesn't have the NDI SDK installed, OBS can still receive.
      - **Source name** — the dropdown lists every NDI source on the LAN.
        Pick the ndi-bar entry for the monitor you want. One entry per
        display you've toggled on.
-     - **Bandwidth** — `Highest` (you're on local LAN, not a remote feed).
-     - **Sync** — `Source Timing`.
+      - **Bandwidth** — start with `Highest` as the correctness baseline.
+      - **Sync / Timing** — test both `Source Timing` and `Network`; receiver,
+        network, and audio-clock behavior determines which is better.
      - **Latency Mode** — `Low` for general use, `Lowest` if you need
        sub-frame latency and can tolerate the occasional audio glitch.
      - Leave the rest at defaults. Audio comes in on the same source.
@@ -124,11 +145,13 @@ If OBS's source dropdown is empty or missing ndi-bar:
 
 - Confirm ndi-bar is actually streaming — the menubar icon should be the
   radio-waves glyph and the display row should have a checkmark.
-- OBS and your Mac must be on the same subnet. NDI uses mDNS for
-  discovery, which doesn't cross VLANs without an [NDI Discovery
+- Confirm the DistroAV plugin and its separately installed NDI Runtime are both
+  present on the receiver.
+- Start with sender and receiver on the same wired or Wi-Fi LAN/subnet. NDI
+  discovery generally doesn't cross VLANs without an [NDI Discovery
   Server](https://docs.ndi.video/tools/discovery-and-registration/ndi-discovery-service).
-- Check firewall: System Settings → Network → Firewall — allow OBS (and
-  ndi-bar) on the local network.
+- Check firewalls on both machines: allow OBS/DistroAV and ndi-bar local-network
+  discovery and media traffic.
 - Restart the NDI plugin's discovery: in OBS, Tools → NDI™ Plugin Settings
   → Main Output: off, then on again.
 
@@ -160,21 +183,30 @@ Mac without Gatekeeper warnings), you need a one-time Apple setup:
 Then each release:
 
 ```sh
-# bump MARKETING_VERSION in project.yml first, then:
+# Set MARKETING_VERSION and CURRENT_PROJECT_VERSION in project.yml first.
 make gen
 TEAM_ID=ABCDE12345 make dist
-# produces dist/ndi-bar-vX.Y.Z.zip (signed, notarized, stapled) + .sha256
+# produces the signed, notarized, and stapled v0.2.0 artifacts:
+#   dist/ndi-bar-v0.2.0.zip
+#   dist/ndi-bar-v0.2.0.zip.sha256
 
-git tag v1.0.0
-git push origin v1.0.0
-gh release create v1.0.0 \
-  dist/ndi-bar-v1.0.0.zip \
-  dist/ndi-bar-v1.0.0.zip.sha256 \
-  --title "ndi-bar 1.0.0"
+# The checksum uses only the archive basename, so it verifies from a download
+# directory containing both files:
+(cd dist && shasum -a 256 -c ndi-bar-v0.2.0.zip.sha256)
 ```
 
-`make dist` won't touch your `make install` / `make run` flows — those stay
-fast and ad-hoc signed for local development.
+`make sign` stops after a clean universal Developer-ID build and strict
+signature verification. `make dist` additionally checks the notary keychain
+profile, submits a temporary archive, requires an `Accepted` result, staples
+and validates the app, and creates the final archive and checksum. It does not
+install the app, reset TCC, bundle the NDI runtime, tag or push git, or publish
+a GitHub release. Review the artifacts before doing those repository-hosting
+steps separately. Set `DEVELOPER_DIR` in the invoking environment when a
+specific stable Xcode installation is required.
+
+The ordinary `make build`, `make release`, `make run`, and `make install`
+flows do not require release credentials and remain ad-hoc signed for local
+development.
 
 ## Screen Recording permission quirk
 
@@ -202,6 +234,20 @@ A proper Developer ID signature would avoid this entirely (TCC binds to
 Team ID instead of cdhash) — done via `make dist` when you're ready to
 distribute.
 
+## Known limitations
+
+- Live NDI discovery, playback, and OBS/DistroAV interoperability still need
+  release-candidate validation on representative sender/receiver systems.
+- ScreenCaptureKit's asynchronous `stopCapture` can fail or fail to return.
+  The shutdown watchdog bounds quit time but deliberately avoids unsafe NDI
+  destruction/unloading when teardown has not completed.
+- Global NDI library initialization and unloading remain coordinated from the
+  main actor; sender creation and destruction use a dedicated background queue.
+- Concurrent audio/video delivery is supported by the implementation, but its
+  runtime behavior has not yet been guaranteed by end-to-end stress testing.
+- The dynamic loader trusts NDI libraries found in the documented local SDK
+  installation paths. `libndi.dylib` is never bundled with ndi-bar.
+
 ## Architecture
 
 ```
@@ -211,7 +257,7 @@ SCShareableContent ─► [SCDisplay] ─► [DisplayInfo]
                                            ▼
                                DisplayStreamer
                                 │           │
-                        SCStream (BGRA, 60) │
+                         SCStream (BGRA)    │
                                 │           ▼
               SCStreamOutput .screen      ─► NDISender.sendVideo
               SCStreamOutput .audio       ┐

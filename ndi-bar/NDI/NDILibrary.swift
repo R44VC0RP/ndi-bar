@@ -14,7 +14,11 @@
 
 import Foundation
 
-final class NDILibrary {
+// Loading/unloading is main-actor orchestrated. Sender create/destroy uses its
+// dedicated lifecycle queue, and immutable resolved send functions are called
+// on capture queues. Shutdown awaits sender destruction before mutation or
+// dlclose, providing the external synchronization for this type.
+final class NDILibrary: @unchecked Sendable {
     static let shared = NDILibrary()
 
     enum LoadError: Error, LocalizedError {
@@ -106,11 +110,12 @@ final class NDILibrary {
         if isLoaded {
             _destroy?()
         }
+        isLoaded = false
+        clearSymbols()
         if let h = handle {
             dlclose(h)
         }
         handle = nil
-        isLoaded = false
     }
 
     deinit { unload() }
@@ -142,6 +147,19 @@ final class NDILibrary {
         _sendVideoAsyncV2     = try sym("NDIlib_send_send_video_async_v2", as: NDIlib_send_send_video_async_v2_func.self)
         _sendAudioV3          = try sym("NDIlib_send_send_audio_v3",       as: NDIlib_send_send_audio_v3_func.self)
         _sendGetNoConnections = try sym("NDIlib_send_get_no_connections",  as: NDIlib_send_get_no_connections_func.self)
+    }
+
+    private func clearSymbols() {
+        _initialize = nil
+        _destroy = nil
+        _version = nil
+        _isSupportedCPU = nil
+        _sendCreate = nil
+        _sendDestroy = nil
+        _sendVideoV2 = nil
+        _sendVideoAsyncV2 = nil
+        _sendAudioV3 = nil
+        _sendGetNoConnections = nil
     }
 }
 

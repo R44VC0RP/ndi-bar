@@ -10,8 +10,8 @@ settings:
   base:
     SWIFT_VERSION: "5.10"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "2"
     ENABLE_HARDENED_RUNTIME: YES
     CODE_SIGN_STYLE: Automatic
     # dev signing; flip to a Developer ID identity when you distribute
@@ -55,3 +55,25 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ryanvogel.ndi-bar
         GENERATE_INFOPLIST_FILE: NO
         COMBINE_HIDPI_IMAGES: YES
+
+  ndi-barTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: ndi-barTests
+    dependencies:
+      - target: ndi-bar
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ryanvogel.ndi-barTests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  ndi-bar:
+    build:
+      targets:
+        ndi-bar: all
+        ndi-barTests: [test]
+    test:
+      targets:
+        - ndi-barTests

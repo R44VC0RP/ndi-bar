@@ -7,10 +7,15 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let shutdownTimeoutSeconds = 10
+
     let streamingController = StreamingController()
 
     private var menuController: StatusMenuController?
     private var settingsWindowController: NSWindowController?
+    private var terminationReplyGate = TerminationReplyGate()
+    private var shutdownTask: Task<Void, Never>?
+    private var shutdownWatchdogTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Menubar-only app; no Dock icon, no main window.
@@ -40,9 +45,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        Task { await streamingController.stopAll() }
-        NDILibrary.shared.unload()
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard terminationReplyGate.begin() else { return .terminateLater }
+
+        // AppKit termination is synchronous by default. Delay it until the
+        // async SCK stop barrier has drained callbacks and released senders;
+        // only then may NDIlib_destroy/dlclose invalidate function pointers.
+        shutdownTask = Task { @MainActor in
+            await streamingController.shutdown()
+            guard terminationReplyGate.resolve(.graceful) else { return }
+
+            shutdownWatchdogTask?.cancel()
+            shutdownWatchdogTask = nil
+            NDILibrary.shared.unload()
+            sender.reply(toApplicationShouldTerminate: true)
+            shutdownTask = nil
+        }
+
+        // stopCapture is an OS callback and can theoretically never resume.
+        // Bound quit latency, but on timeout deliberately leave NDI loaded:
+        // callbacks/senders may still exist and process teardown is the only
+        // safe cleanup mechanism available at that point.
+        shutdownWatchdogTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(Self.shutdownTimeoutSeconds))
+            } catch {
+                return
+            }
+            guard terminationReplyGate.resolve(.timedOut) else { return }
+
+            NSLog("[ndi-bar] shutdown timed out after \(Self.shutdownTimeoutSeconds)s; terminating without destroying or unloading NDI")
+            sender.reply(toApplicationShouldTerminate: true)
+            shutdownWatchdogTask = nil
+        }
+        return .terminateLater
     }
 
     // MARK: Settings window
@@ -58,7 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentViewController: hosting)
         window.title = "ndi-bar Settings"
         window.styleMask = [.titled, .closable, .miniaturizable]
-        window.setContentSize(NSSize(width: 480, height: 420))
+        window.setContentSize(NSSize(width: 500, height: 500))
         window.isReleasedWhenClosed = false
         window.center()
 
