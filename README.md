@@ -29,12 +29,13 @@ One menubar icon. One click to start streaming Monitor 1, 2, 3, or 4.
 
 ## Status
 
-v0.2.0 (build 2) release candidate. It adds bounded custom capture resolution
-and frame-rate controls, automatic active-stream reconfiguration, safer
-capture/sender teardown, lifecycle tests, and a reproducible signed-release
-workflow. Audio capture uses ScreenCaptureKit's built-in system-audio tap (no
-virtual audio device required), with optional selectable microphone capture on
-macOS 15 or later.
+v0.2.1 (build 3) release candidate. This icon-only patch adds the application
+bundle icon to the v0.2 release, which includes bounded custom capture
+resolution and frame-rate controls, automatic active-stream reconfiguration,
+safer capture/sender teardown, lifecycle tests, and a reproducible
+signed-release workflow. Audio capture uses ScreenCaptureKit's built-in
+system-audio tap (no virtual audio device required), with optional selectable
+microphone capture on macOS 15 or later.
 
 Automated builds and unit tests cover configuration and lifecycle logic, but
 this release has not yet been validated end-to-end with a live NDI receiver or
@@ -186,13 +187,13 @@ Then each release:
 # Set MARKETING_VERSION and CURRENT_PROJECT_VERSION in project.yml first.
 make gen
 TEAM_ID=ABCDE12345 make dist
-# produces the signed, notarized, and stapled v0.2.0 artifacts:
-#   dist/ndi-bar-v0.2.0.zip
-#   dist/ndi-bar-v0.2.0.zip.sha256
+# produces the signed, notarized, and stapled v0.2.1 artifacts:
+#   dist/ndi-bar-v0.2.1.zip
+#   dist/ndi-bar-v0.2.1.zip.sha256
 
 # The checksum uses only the archive basename, so it verifies from a download
 # directory containing both files:
-(cd dist && shasum -a 256 -c ndi-bar-v0.2.0.zip.sha256)
+(cd dist && shasum -a 256 -c ndi-bar-v0.2.1.zip.sha256)
 ```
 
 `make sign` stops after a clean universal Developer-ID build and strict
