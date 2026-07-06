@@ -44,7 +44,7 @@ CHECKSUM_NAME := $(ZIP_NAME).sha256
 ZIP_PATH      := $(DIST_DIR)/$(ZIP_NAME)
 CHECKSUM_PATH := $(DIST_DIR)/$(CHECKSUM_NAME)
 
-.PHONY: help gen open build release test strict-concurrency clean run kill install uninstall reset-tcc sign dist notary-login reset-dist
+.PHONY: help gen open build release test strict-concurrency clean run kill install uninstall reset-tcc sign dist notary-login reset-dist _release-path-gate
 
 help:
 	@echo "make gen                - generate $(PROJECT) from project.yml"
@@ -189,6 +189,68 @@ reset-dist:
 	rm -rf "$(DIST_DIR)"
 	mkdir -p "$(DIST_DIR)"
 
+# Fail-closed privacy gate for the exact executable supplied by the signing
+# recipe. Raw scanning covers the complete fat binary; nm is run separately
+# for every required architecture so one universal slice cannot be skipped.
+_release-path-gate:
+	@$(FAIL_FAST); \
+	EXECUTABLE=$${RELEASE_EXECUTABLE:-}; \
+	[[ -n "$$EXECUTABLE" && -f "$$EXECUTABLE" ]] || { echo 'error: RELEASE_EXECUTABLE must name the signed executable' >&2; exit 1; }; \
+	GREP_TOOL=$${PATH_GATE_GREP:-/usr/bin/grep}; \
+	NM_TOOL=$${PATH_GATE_NM:-/usr/bin/nm}; \
+	for TOOL in lipo mktemp "$$NM_TOOL" "$$GREP_TOOL"; do \
+		command -v "$$TOOL" >/dev/null 2>&1 || { echo "error: required path-gate tool missing: $$TOOL" >&2; exit 1; }; \
+	done; \
+	[[ -n "$${HOME:-}" ]] || { echo 'error: HOME must be a nonempty directory path' >&2; exit 1; }; \
+	if REPO_PATH=$$(pwd -P); then :; else \
+		echo 'error: could not canonicalize the repository path' >&2; \
+		exit 1; \
+	fi; \
+	if HOME_PATH=$$(cd -- "$$HOME" && pwd -P); then :; else \
+		echo 'error: could not canonicalize HOME' >&2; \
+		exit 1; \
+	fi; \
+	for LOCAL_PATH in "$$REPO_PATH" "$$HOME_PATH"; do \
+		[[ -n "$$LOCAL_PATH" && "$$LOCAL_PATH" == /* && "$$LOCAL_PATH" != / ]] || { \
+			echo 'error: refusing unsafe empty, relative, or root local-path pattern' >&2; \
+			exit 1; \
+		}; \
+	done; \
+	reject_local_path() { \
+		local INPUT=$$1 LABEL=$$2 NEEDLE=$$3 SCAN_STATUS; \
+		if LC_ALL=C "$$GREP_TOOL" -aFq -- "$$NEEDLE" "$$INPUT"; then \
+			echo "error: $$LABEL contains a local build path" >&2; \
+			return 1; \
+		else \
+			SCAN_STATUS=$$?; \
+		fi; \
+		if [[ $$SCAN_STATUS -eq 1 ]]; then \
+			return 0; \
+		fi; \
+		echo "error: local-path scanner failed for $$LABEL (grep status $$SCAN_STATUS)" >&2; \
+		return 1; \
+	}; \
+	for NEEDLE in "$$REPO_PATH" "$$HOME_PATH/"; do \
+		reject_local_path "$$EXECUTABLE" 'release executable' "$$NEEDLE" || exit 1; \
+	done; \
+	if ARCHS=$$(lipo -archs "$$EXECUTABLE"); then :; else \
+		echo 'error: lipo could not inspect release executable architectures' >&2; \
+		exit 1; \
+	fi; \
+	VERIFY_DIR=$$(mktemp -d "$${TMPDIR:-/tmp}/ndi-bar-path-gate.XXXXXX"); \
+	trap 'rm -rf "$$VERIFY_DIR"' EXIT; \
+	for ARCH in arm64 x86_64; do \
+		[[ " $$ARCHS " == *" $$ARCH "* ]] || { echo "error: required architecture missing from release executable: $$ARCH" >&2; exit 1; }; \
+		NM_OUTPUT="$$VERIFY_DIR/nm-$$ARCH.txt"; \
+		if "$$NM_TOOL" -arch "$$ARCH" -a "$$EXECUTABLE" > "$$NM_OUTPUT"; then :; else \
+			echo "error: nm failed for release executable architecture $$ARCH" >&2; \
+			exit 1; \
+		fi; \
+		for NEEDLE in "$$REPO_PATH" "$$HOME_PATH/"; do \
+			reject_local_path "$$NM_OUTPUT" "release executable $$ARCH symbol table" "$$NEEDLE" || exit 1; \
+		done; \
+	done
+
 # Clean universal Developer-ID build. The exact certificate SHA-1 is resolved
 # from the requested team, and ambiguous certificate sets fail rather than
 # allowing Xcode to choose nondeterministically.
@@ -229,8 +291,13 @@ sign: gen
 	fi; \
 	APP="$(SIGNED_APP)"; \
 	test -d "$$APP" || { echo "error: signed app not found at $$APP" >&2; exit 1; }; \
-	ENTITLEMENTS_PLIST=$$(mktemp "$${TMPDIR:-/tmp}/ndi-bar-entitlements.XXXXXX"); \
-	trap 'rm -f "$$ENTITLEMENTS_PLIST"' EXIT; \
+	EXECUTABLE="$$APP/Contents/MacOS/$(SCHEME)"; \
+	test -f "$$EXECUTABLE" || { echo "error: release executable not found" >&2; exit 1; }; \
+	PATH_GATE_GREP=/usr/bin/grep PATH_GATE_NM=/usr/bin/nm RELEASE_EXECUTABLE="$$EXECUTABLE" \
+		$(MAKE) --no-print-directory _release-path-gate; \
+	VERIFY_DIR=$$(mktemp -d "$${TMPDIR:-/tmp}/ndi-bar-verify.XXXXXX"); \
+	trap 'rm -rf "$$VERIFY_DIR"' EXIT; \
+	ENTITLEMENTS_PLIST="$$VERIFY_DIR/entitlements.plist"; \
 	codesign -d --entitlements :- "$$APP" > "$$ENTITLEMENTS_PLIST" 2>/dev/null; \
 	/usr/bin/plutil -lint "$$ENTITLEMENTS_PLIST" >/dev/null; \
 	GET_TASK_ALLOW=$$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$$ENTITLEMENTS_PLIST" 2>/dev/null || true); \

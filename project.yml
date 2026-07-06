@@ -60,6 +60,10 @@ targets:
           CODE_SIGN_INJECT_BASE_ENTITLEMENTS: YES
         Release:
           CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+          STRIP_SWIFT_SYMBOLS: NO
 
   ndi-barTests:
     type: bundle.unit-test
