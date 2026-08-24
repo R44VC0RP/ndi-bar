@@ -11,7 +11,9 @@
 // AVCaptureSession start/stop calls run on a dedicated session queue.
 
 import Foundation
-import AVFoundation
+// AVCaptureSession predates Sendable. Every cross-queue use here is
+// confined to sessionQueue, so the preconcurrency import is sound.
+@preconcurrency import AVFoundation
 import CoreMedia
 import CoreVideo
 
