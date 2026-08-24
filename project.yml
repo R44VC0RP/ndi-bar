@@ -10,8 +10,8 @@ settings:
   base:
     SWIFT_VERSION: "5.10"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
-    MARKETING_VERSION: "0.3.1"
-    CURRENT_PROJECT_VERSION: "5"
+    MARKETING_VERSION: "0.3.2"
+    CURRENT_PROJECT_VERSION: "6"
     ENABLE_HARDENED_RUNTIME: YES
     CODE_SIGN_STYLE: Automatic
     # dev signing; flip to a Developer ID identity when you distribute
@@ -48,6 +48,7 @@ targets:
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSUIElement: true
         NSHighResolutionCapable: true
+        NSCameraUsageDescription: "ndi-bar can capture a camera and broadcast it as an NDI source when started from the menu bar."
         NSMicrophoneUsageDescription: "ndi-bar can capture microphone audio and broadcast it over NDI when enabled in Settings."
         NSScreenCaptureUsageDescription: "ndi-bar needs screen recording permission to capture displays and broadcast them over NDI."
         NSHumanReadableCopyright: "ndi-bar is independent software. NDI® is a registered trademark of Vizrt NDI AB."
