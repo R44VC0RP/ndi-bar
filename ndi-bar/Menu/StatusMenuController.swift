@@ -10,14 +10,18 @@ import Combine
 @MainActor
 final class StatusMenuController: NSObject, NSMenuDelegate {
     private let controller: StreamingController
+    private let updates: UpdateController
     private let openSettings: () -> Void
 
     private let statusItem: NSStatusItem
     private let overlay = DisplayHighlightOverlay()
     private var cancellables = Set<AnyCancellable>()
 
-    init(controller: StreamingController, openSettings: @escaping () -> Void) {
+    init(controller: StreamingController,
+         updates: UpdateController,
+         openSettings: @escaping () -> Void) {
         self.controller = controller
+        self.updates = updates
         self.openSettings = openSettings
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
@@ -31,6 +35,10 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
         // React to state changes so the menubar icon updates even while open.
         controller.$activeDisplayIDs
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateButtonIcon() }
+            .store(in: &cancellables)
+        controller.$isCameraStreaming
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateButtonIcon() }
             .store(in: &cancellables)
@@ -53,7 +61,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             if !controller.screenRecordingGranted {
                 return "exclamationmark.triangle"
             }
-            return controller.activeDisplayIDs.isEmpty
+            return controller.activeDisplayIDs.isEmpty && !controller.isCameraStreaming
                 ? "rectangle.on.rectangle"
                 : "dot.radiowaves.left.and.right"
         }()
@@ -68,6 +76,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         controller.refreshMicrophones()
+        controller.refreshCameras()
         Task { await controller.refreshDisplays() }
         rebuild(menu: menu)
     }
@@ -163,6 +172,9 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        addCameraSection(to: menu)
+        menu.addItem(.separator())
+
         if controller.microphoneCaptureSupported {
             addMicrophoneSection(to: menu)
             menu.addItem(.separator())
@@ -174,7 +186,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             keyEquivalent: "."
         )
         stopAll.target = self
-        stopAll.isEnabled = !controller.activeDisplayIDs.isEmpty
+        stopAll.isEnabled = !controller.activeDisplayIDs.isEmpty || controller.isCameraStreaming
         menu.addItem(stopAll)
 
         menu.addItem(.separator())
@@ -186,6 +198,8 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         )
         settings.target = self
         menu.addItem(settings)
+
+        addUpdateItem(to: menu)
 
         menu.addItem(.separator())
 
@@ -225,6 +239,43 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         )
         item.view = view
         return item
+    }
+
+    private func addCameraSection(to menu: NSMenu) {
+        let header = NSMenuItem(title: "Camera Source", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+
+        guard !controller.cameraDevices.isEmpty else {
+            let empty = NSMenuItem(title: "No cameras detected", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+            return
+        }
+
+        for device in controller.cameraDevices {
+            let isActive = controller.isCameraStreaming
+                && controller.activeCameraDeviceID == device.id
+            var title = device.name
+            if isActive {
+                switch controller.cameraViewerCount {
+                case ..<0: break
+                case 0:  title += "  ·  broadcasting"
+                case 1:  title += "  ·  1 viewer"
+                default: title += "  ·  \(controller.cameraViewerCount) viewers"
+                }
+            }
+            let item = NSMenuItem(
+                title: title,
+                action: #selector(toggleCameraAction),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = device
+            item.state = isActive ? .on : .off
+            item.isEnabled = controller.ndiReady
+            menu.addItem(item)
+        }
     }
 
     private func addMicrophoneSection(to menu: NSMenu) {
@@ -279,7 +330,44 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         return item
     }
 
+    private func addUpdateItem(to menu: NSMenu) {
+        switch updates.phase {
+        case .available(let update):
+            let item = NSMenuItem(
+                title: "Install Update \(update.tagName)…",
+                action: #selector(installUpdateAction),
+                keyEquivalent: ""
+            )
+            item.target = self
+            menu.addItem(item)
+        case .installing(let status):
+            let item = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        case .checking:
+            let item = NSMenuItem(title: "Checking for Updates…", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        case .idle, .upToDate, .failed:
+            let item = NSMenuItem(
+                title: "Check for Updates…",
+                action: #selector(checkForUpdatesAction),
+                keyEquivalent: ""
+            )
+            item.target = self
+            menu.addItem(item)
+        }
+    }
+
     // MARK: Actions
+
+    @objc private func checkForUpdatesAction() {
+        Task { await updates.checkForUpdates(userInitiated: true) }
+    }
+
+    @objc private func installUpdateAction() {
+        updates.installAvailableUpdate()
+    }
 
     @objc private func stopAllAction() {
         Task { await controller.stopAll() }
@@ -287,6 +375,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     @objc private func openSettingsAction() {
         openSettings()
+    }
+
+    @objc private func toggleCameraAction(_ sender: NSMenuItem) {
+        guard let device = sender.representedObject as? CameraDevice else { return }
+        controller.toggleCamera(device)
     }
 
     @objc private func toggleCaptureMicrophoneAction() {

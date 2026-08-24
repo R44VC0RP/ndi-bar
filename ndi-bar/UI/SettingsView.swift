@@ -5,11 +5,20 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var controller: StreamingController
+    @ObservedObject var updates: UpdateController
 
     var body: some View {
         let microphoneSelection = Binding<String>(
             get: { controller.selectedMicrophoneDeviceID },
             set: { controller.selectMicrophoneDevice($0) }
+        )
+        let cameraSelection = Binding<String>(
+            get: { controller.selectedCameraDeviceID },
+            set: { controller.selectCameraDevice($0) }
+        )
+        let cameraMicrophoneSelection = Binding<String>(
+            get: { controller.cameraMicrophoneDeviceID },
+            set: { controller.selectCameraMicrophoneDevice($0) }
         )
 
         Form {
@@ -112,6 +121,75 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Camera source") {
+                Picker("Camera", selection: cameraSelection) {
+                    Text("System Default").tag(CameraDevice.systemDefaultID)
+                    if controller.selectedCameraDeviceUnavailable {
+                        Text("Unavailable selected camera").tag(controller.selectedCameraDeviceID)
+                    }
+                    ForEach(controller.cameraDevices) { device in
+                        Text(device.name).tag(device.id)
+                    }
+                }
+                .help("Camera captured as a second, independent NDI source.")
+
+                Picker("Microphone", selection: cameraMicrophoneSelection) {
+                    Text("System Default").tag(MicrophoneDevice.systemDefaultID)
+                    if controller.cameraMicrophoneDeviceUnavailable {
+                        Text("Unavailable selected microphone").tag(controller.cameraMicrophoneDeviceID)
+                    }
+                    ForEach(controller.microphoneDevices) { device in
+                        Text(device.name).tag(device.id)
+                    }
+                }
+                .help("Microphone audio sent with the camera source.")
+
+                Text("Start it from the menu bar under \"Camera Source\". It appears as \"\(controller.sourcePrefix) – Camera (…)\" on the network, alongside the display streams.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                if controller.selectedCameraDeviceUnavailable {
+                    Text("The selected camera is not connected. Choose another camera or System Default.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if !controller.cameraPermissionGranted {
+                    HStack(spacing: 8) {
+                        Text("Camera access is requested when the source first starts.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Open Privacy Settings") {
+                            controller.openCameraSettings()
+                        }
+                    }
+                }
+            }
+
+            Section("Updates") {
+                Toggle("Check for updates automatically", isOn: $updates.automaticChecksEnabled)
+                    .help("Checks the GitHub releases feed once a day.")
+
+                HStack(spacing: 8) {
+                    Text(updateStatusText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    switch updates.phase {
+                    case .available(let update):
+                        Button("Install \(update.tagName)") {
+                            updates.installAvailableUpdate()
+                        }
+                    case .checking, .installing:
+                        ProgressView()
+                            .controlSize(.small)
+                    case .idle, .upToDate, .failed:
+                        Button("Check Now") {
+                            Task { await updates.checkForUpdates(userInitiated: true) }
+                        }
+                    }
+                }
+            }
+
             Section("NDI") {
                 HStack(spacing: 8) {
                     Circle()
@@ -133,6 +211,24 @@ struct SettingsView: View {
         .frame(minWidth: 460, minHeight: 480)
         .onAppear {
             controller.refreshMicrophones()
+            controller.refreshCameras()
+        }
+    }
+
+    private var updateStatusText: String {
+        switch updates.phase {
+        case .idle:
+            return "Version \(updates.currentVersionString)"
+        case .checking:
+            return "Checking for updates…"
+        case .upToDate:
+            return "Version \(updates.currentVersionString) — up to date"
+        case .available(let update):
+            return "Update available: \(update.tagName) (current \(updates.currentVersionString))"
+        case .installing(let status):
+            return status
+        case .failed(let message):
+            return message
         }
     }
 }
