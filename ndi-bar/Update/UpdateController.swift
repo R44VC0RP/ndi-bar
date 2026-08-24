@@ -322,7 +322,10 @@ final class UpdateController: ObservableObject {
     /// graceful NDI shutdown completes), then opens the new bundle.
     private func scheduleRelaunch(of bundleURL: URL) throws {
         let pid = ProcessInfo.processInfo.processIdentifier
-        let script = "while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"$0\""
+        // After exit, LaunchServices can briefly still consider the app
+        // "terminating", making a single immediate `open` a silent no-op.
+        // Wait for the process to vanish, give LS a moment, then retry.
+        let script = "while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.2; done; /bin/sleep 1; for i in 1 2 3 4 5; do /usr/bin/open \"$0\" && exit 0; /bin/sleep 2; done"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = ["-c", script, bundleURL.path]
