@@ -304,6 +304,14 @@ sign: gen
 	[[ "$$GET_TASK_ALLOW" != 'true' ]] || { echo 'error: distribution app contains com.apple.security.get-task-allow=true' >&2; exit 1; }; \
 	DISABLE_LIBRARY_VALIDATION=$$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.disable-library-validation' "$$ENTITLEMENTS_PLIST" 2>/dev/null || true); \
 	[[ "$$DISABLE_LIBRARY_VALIDATION" == 'true' ]] || { echo 'error: distribution app must contain com.apple.security.cs.disable-library-validation=true for dynamic libndi' >&2; exit 1; }; \
+	CAMERA_ENTITLEMENT=$$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' "$$ENTITLEMENTS_PLIST" 2>/dev/null || true); \
+	[[ "$$CAMERA_ENTITLEMENT" == 'true' ]] || { echo 'error: hardened runtime app must contain com.apple.security.device.camera=true for the camera source' >&2; exit 1; }; \
+	AUDIO_ENTITLEMENT=$$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$$ENTITLEMENTS_PLIST" 2>/dev/null || true); \
+	[[ "$$AUDIO_ENTITLEMENT" == 'true' ]] || { echo 'error: hardened runtime app must contain com.apple.security.device.audio-input=true for microphone capture' >&2; exit 1; }; \
+	for USAGE_KEY in NSCameraUsageDescription NSMicrophoneUsageDescription NSScreenCaptureUsageDescription; do \
+		/usr/libexec/PlistBuddy -c "Print :$$USAGE_KEY" "$$APP/Contents/Info.plist" >/dev/null 2>&1 \
+			|| { echo "error: Info.plist is missing $$USAGE_KEY (TCC kills the app on first access without it)" >&2; exit 1; }; \
+	done; \
 	ACTUAL_VERSION=$$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$$APP/Contents/Info.plist"); \
 	ACTUAL_BUILD=$$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$$APP/Contents/Info.plist"); \
 	[[ "$$ACTUAL_VERSION" == "$(VERSION)" ]] || { echo "error: app version $$ACTUAL_VERSION != $(VERSION)" >&2; exit 1; }; \
