@@ -10,7 +10,10 @@ struct NDIBarApp: App {
 
     var body: some Scene {
         Settings {
-            SettingsView(controller: appDelegate.streamingController)
+            SettingsView(
+                controller: appDelegate.streamingController,
+                updates: appDelegate.updateController
+            )
         }
     }
 }

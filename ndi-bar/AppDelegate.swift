@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let shutdownTimeoutSeconds = 10
 
     let streamingController = StreamingController()
+    let updateController = UpdateController()
 
     private var menuController: StatusMenuController?
     private var settingsWindowController: NSWindowController?
@@ -23,12 +24,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menuController = StatusMenuController(
             controller: streamingController,
+            updates: updateController,
             openSettings: { [weak self] in self?.showSettings() }
         )
 
         Task { @MainActor in
             await streamingController.boot()
         }
+        updateController.startAutomaticChecks()
 
         // If the user toggles our permission in Settings and we become
         // active again (e.g. after clicking us in the dock or Settings),
@@ -90,7 +93,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let hosting = NSHostingController(rootView: SettingsView(controller: streamingController))
+        let hosting = NSHostingController(rootView: SettingsView(
+            controller: streamingController,
+            updates: updateController
+        ))
         let window = NSWindow(contentViewController: hosting)
         window.title = "ndi-bar Settings"
         window.styleMask = [.titled, .closable, .miniaturizable]

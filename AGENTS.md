@@ -11,6 +11,7 @@
   - `NDI/` — Runtime loader and C-struct mirrors for libndi.dylib.
   - `Capture/` — ScreenCaptureKit enumeration and per-display streaming.
   - `State/` — `StreamingController` (the @MainActor ObservableObject).
+  - `Update/` — self-updater (GitHub Releases check, verified in-place install).
   - `Menu/` — NSStatusItem/NSMenu controller.
   - `UI/` — SwiftUI Settings view.
 - `ndi-barTests/` — capture configuration and lifecycle unit tests.
@@ -78,17 +79,33 @@ xcodebuild -project ndi-bar.xcodeproj -scheme ndi-bar \
   - start/stop lifecycle per-display
   - persisted preferences (`UserDefaults`: sourcePrefix, fps, resolutionCap,
     customResolutionWidth/Height, showsCursor, captureAudio,
-    captureMicrophone, selectedMicrophoneDeviceID; migrates limitTo1080p)
+    captureMicrophone, selectedMicrophoneDeviceID, selectedCameraDeviceID,
+    cameraMicrophoneDeviceID; migrates limitTo1080p)
   - screen-recording permission gate
+  - the camera + microphone NDI source (`CameraStreamer` lifecycle, camera
+    enumeration, camera/microphone TCC gates)
 - `DisplayStreamer` is NOT @MainActor — SCStream delivery callbacks must
   never touch the main actor on the hot path. It uses two dedicated serial
   queues (`captureQueue`, `audioQueue`).
+- `CameraStreamer` mirrors that discipline for the camera + microphone NDI
+  source: AVCaptureSession configuration and blocking start/stop run on
+  `sessionQueue`; video/audio delivery stays on `videoQueue`/`audioQueue`.
+  At most one camera source runs at a time, independent of display streams.
+- `UpdateController` (@MainActor, owned by AppDelegate) self-updates the app:
+  checks `releases/latest` for repo `R44VC0RP/ndi-bar` daily and on demand,
+  then downloads the release zip, verifies sha256 + `codesign --verify` +
+  Team ID match (ad-hoc dev builds accept any Developer ID team), swaps the
+  bundle via same-volume renames, and relaunches after graceful termination.
+  Pure logic lives in `UpdateModels.swift` and is covered by unit tests.
+  Release asset names must stay `ndi-bar-v<X.Y.Z>.zip` (+ `.zip.sha256`) —
+  the updater resolves them by that convention.
 - `NDILibrary` is a singleton that dlopen's libndi.dylib. All NDI C entry
   points are resolved via `dlsym` and stored as `@convention(c)` function
   pointers in `NDITypes.swift`. Do not introduce a bridging header.
 - `NDISender` creation and destruction run on its dedicated off-main lifecycle
   queue. Graceful teardown awaits explicit destruction after callback drains;
-  RAII provides a defensive off-main fallback. One sender per display.
+  RAII provides a defensive off-main fallback. One sender per display, plus
+  one for the camera source when active.
 
 ## Code Style Guidelines
 
